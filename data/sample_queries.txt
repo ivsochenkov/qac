@@ -1,0 +1,121 @@
+weather today	940
+weather tomorrow	610
+weather new york	480
+weather london	420
+weather forecast 10 day	300
+new york times	720
+new york pizza	380
+new york to london flights	260
+new york marathon	150
+how to tie a tie	330
+how to lose weight fast	290
+how to make pancakes	260
+how to reset iphone	240
+how to screenshot on mac	220
+how to learn python	210
+best laptop 2026	350
+best pizza near me	310
+best movies of all time	280
+best vpn	260
+python tutorial	400
+python list comprehension	190
+python dict sort by value	170
+python virtual environment	160
+cmake tutorial	140
+cmake find_package boost	90
+cheap flights to paris	270
+cheap hotels in rome	180
+currency converter	300
+translate english to spanish	250
+translate english to russian	230
+what is the capital of australia	200
+what time is it in tokyo	190
+football scores	330
+football world cup	270
+nearest pharmacy	240
+restaurants open now	260
+used cars for sale	210
+stock market today	230
+bitcoin price	420
+chocolate cake recipe	220
+chicken soup recipe	200
+spaghetti carbonara recipe	185
+погода сегодня	910
+погода завтра	580
+погода в москве	560
+погода в санкт петербурге	320
+курс доллара	700
+курс евро	520
+купить билеты на самолет	340
+купить билеты в кино	280
+купить iphone	230
+как приготовить борщ	300
+как приготовить блины	260
+как похудеть	310
+как узнать свой ип адрес	150
+рецепт шарлотки	240
+рецепт оладий	170
+расписание электричек	360
+расписание поездов	330
+перевод с русского на английский	250
+новости сегодня	480
+новости спорта	260
+фильмы 2026	220
+сериалы онлайн	300
+работа в москве	270
+гороскоп на сегодня	290
+яндекс карты	200
+wetter heute	620
+wetter morgen	430
+wetter berlin	390
+wetter münchen	260
+wetter hamburg	240
+nachrichten aktuell	450
+fußball ergebnisse	380
+fußball bundesliga tabelle	330
+rezept apfelkuchen	210
+rezept schnitzel	230
+rezept kartoffelsalat	190
+übersetzer deutsch englisch	300
+zugverbindung berlin münchen	280
+zugverbindung hamburg köln	150
+günstige flüge nach london	240
+öffnungszeiten apotheke	200
+straße der romantik	60
+größte städte deutschlands	90
+tiempo hoy	560
+tiempo mañana	400
+tiempo en madrid	380
+tiempo en barcelona	310
+noticias de hoy	420
+resultados de fútbol	350
+liga española clasificación	290
+receta de paella	260
+receta de tortilla española	240
+receta de croquetas	170
+traductor español inglés	280
+vuelos baratos a méxico	230
+hoteles baratos en madrid	190
+cómo hacer una tortilla	210
+cómo llegar al aeropuerto	150
+niño pequeño	40
+año nuevo	110
+météo aujourd'hui	500
+météo paris	420
+recette de crêpes	240
+recette de ratatouille	190
+actualités du jour	310
+résultats de football	280
+vol pas cher pour new york	200
+traduction français anglais	260
+où est la gare	90
+c++ standard library	120
+c++ vector sort	110
+rock 'n' roll	70
+rock'n'roll history	45
+ice-cream shops nearby	95
+covid-19 symptoms	130
+3d printer	125
+4k monitor	160
+iphone 15 pro max	280
+windows 11 download	300

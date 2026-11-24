@@ -1,0 +1,224 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>qac demo</title>
+<style>
+  :root {
+    --bg: #f6f7f9; --panel: #ffffff; --text: #1d2330; --muted: #667085; --line: #dde1e8;
+    --accent: #2f5fd0; --accent-soft: #e8eefc; --danger: #b42318; --ok: #1a7f4b;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #11151c; --panel: #1a202b; --text: #e6e9ef; --muted: #98a2b3; --line: #2b3342;
+      --accent: #7aa2ff; --accent-soft: #243256; --danger: #ff8a80; --ok: #6bd49a;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 15px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  main { max-width: 980px; margin: 0 auto; padding: 24px 16px 48px; }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  .sub { color: var(--muted); margin: 0 0 20px; }
+  .bar { display: flex; gap: 8px; }
+  input[type=text], input[type=number] {
+    font: inherit; color: inherit; background: var(--panel); border: 1px solid var(--line);
+    border-radius: 8px; padding: 10px 12px; min-width: 0;
+  }
+  select { font: inherit; color: inherit; background: var(--panel); border: 1px solid var(--line);
+           border-radius: 8px; padding: 6px 8px; }
+  input:focus-visible, select:focus-visible, button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+  #q { flex: 1; font-size: 17px; }
+  button { font: inherit; color: inherit; background: var(--panel); border: 1px solid var(--line);
+           border-radius: 8px; padding: 9px 12px; cursor: pointer; }
+  button:hover { border-color: var(--accent); }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  .opts { display: flex; flex-wrap: wrap; gap: 14px 20px; margin: 12px 0 18px; align-items: center;
+          color: var(--muted); font-size: 14px; }
+  .opts label { display: inline-flex; gap: 6px; align-items: center; }
+  .opts input[type=number] { width: 84px; padding: 6px 8px; }
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  @media (max-width: 700px) { .grid { grid-template-columns: 1fr; } }
+  section { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; overflow: hidden; }
+  section > h2 { font-size: 13px; letter-spacing: .04em; text-transform: uppercase; color: var(--muted);
+                 margin: 0; padding: 10px 14px; border-bottom: 1px solid var(--line); display: flex;
+                 justify-content: space-between; }
+  ul { list-style: none; margin: 0; padding: 0; min-height: 52px; }
+  li { display: flex; align-items: center; gap: 10px; padding: 8px 14px; cursor: pointer;
+       border-bottom: 1px solid var(--line); }
+  li:last-child { border-bottom: 0; }
+  li[aria-selected=true], li:hover { background: var(--accent-soft); }
+  li .t { flex: 1; overflow-wrap: anywhere; }
+  li .f { color: var(--muted); font-variant-numeric: tabular-nums; font-size: 13px; }
+  li .x { padding: 0 8px; border: 0; background: none; color: var(--muted); font-size: 16px; }
+  li .x:hover { color: var(--danger); }
+  .empty { color: var(--muted); padding: 14px; cursor: default; }
+  .note { margin: 12px 0 0; min-height: 22px; font-size: 14px; color: var(--muted); }
+  .note.err { color: var(--danger); } .note.ok { color: var(--ok); }
+  .admin { margin-top: 22px; display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+  pre { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 12px 14px;
+        overflow: auto; margin: 12px 0 0; font-size: 13px; display: none; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Query autocomplete</h1>
+  <p class="sub">Type to complete. <b>Enter</b> adds the text to the user's history, <b>&#8593;/&#8595;</b> choose a suggestion, <b>Tab</b> accepts it.</p>
+
+  <div class="bar">
+    <input id="q" type="text" autocomplete="off" spellcheck="false" placeholder="Start typing&hellip;" autofocus aria-label="Query">
+    <button id="addGlobal" title="Add the text to the global pool">Add to global</button>
+  </div>
+  <div class="opts">
+    <label>user id <input id="user" type="number" min="0" max="4294967295" placeholder="none"></label>
+    <label>top&#8209;N <input id="n" type="number" min="0" max="100" value="10"></label>
+    <label>top&#8209;M <input id="m" type="number" min="0" max="100" value="5"></label>
+    <label><input id="correct" type="checkbox"> spell correction</label>
+    <label>global ranking
+      <select id="rank" title="How the global suggestions are ordered">
+        <option value="frequency">by query frequency</option>
+        <option value="avg_word_freq">by mean word frequency</option>
+      </select>
+    </label>
+  </div>
+
+  <div class="grid">
+    <section><h2><span>Global</span><span id="gMeta"></span></h2><ul id="global" role="listbox" aria-label="Global suggestions"></ul></section>
+    <section><h2><span>User history</span><span id="uMeta"></span></h2><ul id="userList" role="listbox" aria-label="User suggestions"></ul></section>
+  </div>
+  <p id="note" class="note" role="status"></p>
+
+  <div class="admin">
+    <button id="snap">Snapshot</button>
+    <button id="opt">Optimize</button>
+    <button id="stats">Stats</button>
+  </div>
+  <pre id="out"></pre>
+</main>
+
+<script>
+(() => {
+  const $ = (id) => document.getElementById(id);
+  const q = $('q'), userEl = $('user'), nEl = $('n'), mEl = $('m'), correctEl = $('correct'), rankEl = $('rank');
+  const lists = { global: $('global'), user: $('userList') };
+  let timer = 0, seq = 0, rows = [], sel = -1;
+
+  const note = (msg, kind) => { const e = $('note'); e.textContent = msg || ''; e.className = 'note ' + (kind || ''); };
+  const userId = () => { const v = userEl.value.trim(); return v === '' ? null : v; };
+
+  async function api(method, path, body) {
+    const res = await fetch(path, {
+      method, headers: body ? { 'Content-Type': 'application/json' } : undefined,
+      body: body ? JSON.stringify(body) : undefined,
+    });
+    let data = null;
+    try { data = await res.json(); } catch (_) { /* no body */ }
+    if (!res.ok) throw new Error((data && data.message) || ('HTTP ' + res.status));
+    return data;
+  }
+
+  function render(pool, items, meta) {
+    const ul = lists[pool];
+    ul.replaceChildren();
+    if (!items.length) {
+      const li = document.createElement('li'); li.className = 'empty'; li.textContent = 'nothing';
+      ul.append(li);
+      return;
+    }
+    for (const it of items) {
+      const li = document.createElement('li');
+      li.setAttribute('role', 'option');
+      const t = document.createElement('span'); t.className = 't'; t.textContent = it.text;
+      const f = document.createElement('span'); f.className = 'f'; f.textContent = '×' + it.freq;
+      const x = document.createElement('button'); x.className = 'x'; x.type = 'button';
+      x.textContent = '✕'; x.title = 'Remove this query'; x.setAttribute('aria-label', 'Remove ' + it.text);
+      x.addEventListener('click', (e) => { e.stopPropagation(); remove(pool, it); });
+      li.append(t, f, x);
+      li.addEventListener('click', () => accept(it.text));
+      ul.append(li);
+      rows.push({ li, text: it.text });
+    }
+  }
+
+  function select(i) {
+    if (sel >= 0 && rows[sel]) rows[sel].li.removeAttribute('aria-selected');
+    sel = rows.length ? (i + rows.length) % rows.length : -1;
+    if (sel >= 0) { rows[sel].li.setAttribute('aria-selected', 'true'); rows[sel].li.scrollIntoView({ block: 'nearest' }); }
+  }
+
+  function accept(text) { q.value = text + ' '; q.focus(); refresh(); }
+
+  async function refresh() {
+    const mine = ++seq;
+    const p = new URLSearchParams({ q: q.value, n: nEl.value || '10', m: mEl.value || '5' });
+    if (userId() !== null) p.set('user', userId());
+    if (correctEl.checked) p.set('correct', '1');
+    if (rankEl.value !== 'frequency') p.set('rank', rankEl.value);
+    try {
+      const r = await api('GET', '/v1/complete?' + p);
+      if (mine !== seq) return;  // a newer request is already on its way
+      rows = []; sel = -1;
+      render('global', r.global);
+      render('user', userId() === null ? [] : r.user);
+      $('gMeta').textContent = r.global.length ? r.global.length + ' · ' + r.took_us + ' µs' : '';
+      $('uMeta').textContent = r.user.length && userId() !== null ? String(r.user.length) : '';
+      let msg = '', kind = '';
+      if (r.corrected) msg = 'Showing results for “' + r.corrected + '”';
+      if (r.truncated) msg += (msg ? ' · ' : '') + 'approximate: a scan budget ran out';
+      note(msg, kind);
+    } catch (e) {
+      if (mine === seq) note(e.message, 'err');
+    }
+  }
+
+  async function remove(pool, it) {
+    try {
+      if (pool === 'global') await api('DELETE', '/v1/queries/' + it.id);
+      else await api('DELETE', '/v1/users/' + encodeURIComponent(userId()) + '/queries/' + it.id);
+      note('Removed “' + it.text + '”', 'ok');
+      refresh();
+    } catch (e) { note(e.message, 'err'); }
+  }
+
+  async function add(scope) {
+    const text = q.value.trim();
+    if (!text) return;
+    try {
+      let r;
+      if (scope === 'user') {
+        if (userId() === null) throw new Error('enter a user id first');
+        r = await api('POST', '/v1/users/' + encodeURIComponent(userId()) + '/queries', { query: text });
+      } else {
+        r = await api('POST', '/v1/queries', { query: text });
+      }
+      note((r.created ? 'Added' : 'Counted') + ' “' + r.text + '” (×' + r.freq + ')', 'ok');
+      refresh();
+    } catch (e) { note(e.message, 'err'); }
+  }
+
+  async function admin(path, label) {
+    try {
+      const r = await api(path === '/v1/stats' ? 'GET' : 'POST', path);
+      const out = $('out'); out.style.display = 'block'; out.textContent = JSON.stringify(r, null, 2);
+      note(label + ' done', 'ok');
+    } catch (e) { note(e.message, 'err'); }
+  }
+
+  q.addEventListener('input', () => { clearTimeout(timer); timer = setTimeout(refresh, 90); });
+  q.addEventListener('keydown', (e) => {
+    if (e.key === 'ArrowDown') { e.preventDefault(); select(sel + 1); }
+    else if (e.key === 'ArrowUp') { e.preventDefault(); select(sel - 1); }
+    else if (e.key === 'Tab' && sel >= 0) { e.preventDefault(); accept(rows[sel].text); }
+    else if (e.key === 'Enter') { e.preventDefault(); sel >= 0 ? accept(rows[sel].text) : add('user'); }
+  });
+  for (const el of [userEl, nEl, mEl, correctEl, rankEl]) el.addEventListener('change', refresh);
+  $('addGlobal').addEventListener('click', () => add('global'));
+  $('snap').addEventListener('click', () => admin('/v1/snapshot', 'Snapshot'));
+  $('opt').addEventListener('click', () => admin('/v1/optimize', 'Optimize'));
+  $('stats').addEventListener('click', () => admin('/v1/stats', 'Stats'));
+  refresh();
+})();
+</script>
+</body>
+</html>

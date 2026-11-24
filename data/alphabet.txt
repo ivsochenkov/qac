@@ -1,0 +1,112 @@
+# qac alphabet: English, Russian, German, Spanish, French (+ digits).
+#
+# Format (one entry per line, whitespace separated, '#' starts a comment):
+#   <char> [<char> ...]        a letter class. All characters of the class are
+#                              the same letter (case folding, accent folding);
+#                              the first one is the canonical form that is shown
+#                              in suggestions. Each class gets one byte (max 255).
+#   @separators <char> ...     characters that end a word (whitespace always does).
+# A character may also be written as U+XXXX. Characters that are neither
+# letters nor separators make a query malformed (it is rejected).
+
+# --- Latin
+a A
+b B
+c C
+d D
+e E
+f F
+g G
+h H
+i I
+j J
+k K
+l L
+m M
+n N
+o O
+p P
+q Q
+r R
+s S
+t T
+u U
+v V
+w W
+x X
+y Y
+z Z
+# --- digits
+0
+1
+2
+3
+4
+5
+6
+7
+8
+9
+# --- German / Spanish / French extensions (accented letters stay distinct)
+á Á
+à À
+â Â
+ä Ä
+æ Æ
+ç Ç
+é É
+è È
+ê Ê
+ë Ë
+í Í
+î Î
+ï Ï
+ñ Ñ
+ó Ó
+ô Ô
+ö Ö
+œ Œ
+ú Ú
+ù Ù
+û Û
+ü Ü
+ÿ Ÿ
+ß ẞ
+# --- apostrophes are part of words (don't, l'été)
+' ’
+# --- Cyrillic (ё is folded into е)
+а А
+б Б
+в В
+г Г
+д Д
+е Е ё Ё
+ж Ж
+з З
+и И
+й Й
+к К
+л Л
+м М
+н Н
+о О
+п П
+р Р
+с С
+т Т
+у У
+ф Ф
+х Х
+ц Ц
+ч Ч
+ш Ш
+щ Щ
+ъ Ъ
+ы Ы
+ь Ь
+э Э
+ю Ю
+я Я
+
+# --- separators
+@separators . , ; : ! ? ¿ ¡ ( ) [ ] { } " « » „ “ ” / \ | - – — _ & @ U+0023 $ % * + = < > ~ ^ ` … ·
