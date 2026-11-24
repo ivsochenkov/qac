@@ -1,6 +1,6 @@
 # qac — query autocomplete
 
-![qac!](qac.png)
+![qac!](qac.jpeg)
 
 A C++17 library and REST server that completes what a user is typing from a pool of
 past queries: the **global** pool (what everybody searches) and the **user's own
