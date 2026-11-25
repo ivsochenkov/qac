@@ -303,3 +303,77 @@ TEST_F(ApiFixture, RankDoesNotChangeTheUserList) {
   EXPECT_FALSE(avg.at("user").as_array()[0].as_object().contains("score"));
   EXPECT_NE(texts(plain, "global"), texts(avg, "global"));
 }
+
+// ================================================================== tail fallback over HTTP
+
+TEST_F(ApiFixture, TailFallbackIsOnByDefaultAndReportsMatchedWords) {
+  add("red foxes jump across the trees", 5);
+  add("foxes juggernaut", 2);
+  const std::string q = "/v1/complete?q=Long+time+ago++far+in+the+Galaxy+red+foxes+ju";
+
+  auto r = call("GET", q);
+  ASSERT_EQ(r.status, 200) << r.body;
+  auto v = parse(r);
+  EXPECT_EQ(texts(v, "global"), (std::vector<std::string>{"red foxes jump across the trees", "foxes juggernaut"}));
+  EXPECT_EQ(v.at("global").as_array()[0].at("matched_words").as_int64(), 3);
+  EXPECT_EQ(v.at("global").as_array()[1].at("matched_words").as_int64(), 2);
+  EXPECT_FALSE(v.as_object().contains("input_truncated"));
+
+  EXPECT_TRUE(texts(parse(call("GET", q + "&tail=0")), "global").empty());
+  EXPECT_EQ(texts(parse(call("GET", q + "&tail=2")), "global"), (std::vector<std::string>{"foxes juggernaut"}));
+  EXPECT_EQ(texts(parse(call("GET", q + "&tail=3&min_tail=3")), "global"),
+            (std::vector<std::string>{"red foxes jump across the trees"}));
+  EXPECT_EQ(call("GET", q + "&tail=1").status, 200);  // the default floor yields to a short tail
+
+  // an ordinary lookup reports the whole input
+  v = parse(call("GET", "/v1/complete?q=foxes+ju"));
+  EXPECT_EQ(texts(v, "global"), (std::vector<std::string>{"foxes juggernaut"}));
+  EXPECT_EQ(v.at("global").as_array()[0].at("matched_words").as_int64(), 2);
+}
+
+TEST_F(ApiFixture, RejectsBadTailParameters) {
+  for (const char* t : {"/v1/complete?q=a&tail=33", "/v1/complete?q=a&tail=-1", "/v1/complete?q=a&tail=x",
+                        "/v1/complete?q=a&min_tail=0", "/v1/complete?q=a&min_tail=x",
+                        "/v1/complete?q=a&tail=2&min_tail=3", "/v1/complete?q=a&min_tail=40"}) {
+    const auto r = call("GET", t);
+    EXPECT_EQ(r.status, 400) << t << " -> " << r.body;
+    EXPECT_EQ(parse(r).at("error").as_string(), "bad_request");
+  }
+  EXPECT_EQ(call("GET", "/v1/complete?q=a&tail=0&min_tail=3").status, 200);  // the floor is moot when off
+}
+
+TEST_F(ApiFixture, OverLongInputIsUsedFromItsEndAndFlagged) {
+  add("red foxes jump", 3);
+  std::string q;
+  for (int i = 0; i < 40; ++i) q += "bla+";
+  const auto r = call("GET", "/v1/complete?q=" + q + "red+foxes+ju");
+  ASSERT_EQ(r.status, 200) << r.body;
+  const auto v = parse(r);
+  EXPECT_EQ(texts(v, "global"), (std::vector<std::string>{"red foxes jump"}));
+  ASSERT_TRUE(v.as_object().contains("input_truncated"));
+  EXPECT_TRUE(v.at("input_truncated").as_bool());
+  // still an error when what is kept is not text
+  EXPECT_EQ(call("GET", "/v1/complete?q=" + q + "%E6%97%A5").status, 400);
+}
+
+TEST_F(ApiFixture, ServerWideTailDefaultsCanBeSet) {
+  add("red foxes jump", 3);
+  ApiConfig ac;
+  ac.default_tail = 0;  // the operator switched the fallback off
+  Api off(*engine, ac);
+  const std::string q = "/v1/complete?q=long+ago+red+foxes+ju";
+  EXPECT_TRUE(texts(parse(off.handle({"GET", q, ""})), "global").empty());
+  EXPECT_EQ(texts(parse(off.handle({"GET", q + "&tail=3", ""})), "global"),
+            (std::vector<std::string>{"red foxes jump"}));  // a request can still ask for it
+  EXPECT_EQ(texts(parse(call("GET", q)), "global"), (std::vector<std::string>{"red foxes jump"}));
+}
+
+TEST_F(ApiFixture, StatsReportTheHotPrefixTable) {
+  add("apple", 2);
+  add("apricot", 1);
+  EXPECT_EQ(texts(parse(call("GET", "/v1/complete?q=ap")), "global"), (std::vector<std::string>{"apple", "apricot"}));
+  const auto s = parse(call("GET", "/v1/stats"));
+  EXPECT_GE(s.at("hot_lookups").as_int64(), 1);
+  EXPECT_GE(s.at("hot_prefixes").as_int64(), 2);
+  EXPECT_GE(s.at("hot_entries").as_int64(), 4);
+}

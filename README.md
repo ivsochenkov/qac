@@ -98,7 +98,7 @@ tabs followed by digits are part of your queries.
 
 | | |
 |---|---|
-| `GET /v1/complete?q=<text>[&n=10][&user=<id>&m=5][&correct=1][&rank=avg_word_freq]` | top-N global + top-M from the user's history |
+| `GET /v1/complete?q=<text>[&n=10][&user=<id>&m=5][&correct=1][&rank=avg_word_freq][&tail=3][&min_tail=2]` | top-N global + top-M from the user's history |
 | `POST /v1/queries` `{"query":"…","count":1}` | add to the global pool |
 | `POST /v1/users/{user}/queries` `{"query":"…","count":1,"also_global":false}` | add to a user's history |
 | `DELETE /v1/queries/{id}` | remove from the global pool |
@@ -111,8 +111,8 @@ tabs followed by digits are part of your queries.
 
 ```
 $ curl 'localhost:8080/v1/complete?q=new+york+&n=2&user=42&m=2'
-{"global":[{"id":7,"text":"new york times","freq":720},{"id":8,"text":"new york pizza","freq":380}],
- "user":[{"id":131,"text":"new york marathon","freq":3,"last_used":1795118145}],
+{"global":[{"id":7,"text":"new york times","freq":720,"matched_words":2},{"id":8,"text":"new york pizza","freq":380,"matched_words":2}],
+ "user":[{"id":131,"text":"new york marathon","freq":3,"last_used":1795118145,"matched_words":2}],
  "truncated":false,"took_us":18}
 ```
 
@@ -125,11 +125,118 @@ $ curl 'localhost:8080/v1/complete?q=new+york+&n=2&user=42&m=2'
 * `rank=avg_word_freq` re-ranks the **global** candidates (the top-N) by the *mean frequency of
   the words each candidate consists of*; `rank=frequency` (the default) is the plain order above.
   See *Ranking by mean word frequency* below. The user's list is not affected.
+* `tail` and `min_tail` control the fallback for long inputs (see *Long inputs: the tail
+  fallback*); every suggestion carries `matched_words`, the number of the last words of the
+  input it matches. `input_truncated: true` appears when the input was longer than the limits
+  and only its end was used.
 * `truncated: true` means a scan budget ran out (see *Limits*), so the list may be approximate.
 * Errors are JSON `{"error":"bad_request","message":"…"}` with `400` (malformed input,
   including characters outside the alphabet), `404`, `405`, `409` (maintenance already
   running), `413`, `501`.
-* Malformed queries are **rejected whole** on every endpoint; nothing is partially stored.
+* Malformed queries are **rejected whole** on every endpoint; nothing is partially stored. For
+  `/v1/complete` an over-long input is not malformed: only its end is used (see below).
+
+## Long inputs: the tail fallback
+
+A stored query is matched as a *prefix* of what was typed, so a long input such as
+`Long time ago far in the Galaxy red foxes ju` finds nothing even though `red foxes jump across
+the trees` and `foxes juggernaut` are in the pool. With the fallback, a lookup that finds fewer
+than N (global) or M (user) suggestions is retried with only the **last words** of the input,
+the word being typed included:
+
+| step | looks up | finds |
+|---|---|---|
+| 1 | the whole input | nothing |
+| 2 | the last `tail` words (3): `red foxes ju` | `red foxes jump across the trees` |
+| 3 | one word fewer, down to `min_tail` (2): `foxes ju` | `foxes juggernaut` |
+
+```
+$ curl -G localhost:8080/v1/complete --data-urlencode 'q=Long time ago  far in the Galaxy red foxes ju'
+{"global":[{"id":122,"text":"red foxes jump across the trees","freq":5,"matched_words":3},
+           {"id":123,"text":"foxes juggernaut","freq":2,"matched_words":2}],"user":[],"truncated":false,"took_us":54}
+```
+
+* **Parameters.** `tail` (default 3, 0 switches the fallback off, at most 32) is the longest
+  shorter lookup; `min_tail` (default 2, 1 … `tail`) the shortest. Server-wide defaults:
+  `qac serve --tail N --min-tail N`; CLI: `qac complete --tail N --min-tail N`. A `min_tail`
+  larger than `tail` is a `400`, except that the *default* floor yields to an explicit short
+  `tail` (`tail=1` alone works). A tail as long as the whole input would repeat step 1 and is
+  skipped, so a two-word input never falls back below two words with the defaults.
+* **Order and top-up.** Suggestions of the more specific lookup come first; each shorter lookup
+  only fills the places that are left, and a query is listed once, at its most specific match.
+  So a rare 3-word match is listed before a very frequent 2-word one: the ranking is by
+  specificity first, then (within a lookup) by the usual ranking.
+* **`matched_words`.** How many trailing words of the input the suggestion matches (the whole
+  input for an ordinary lookup). A client that applies the suggestion should replace exactly
+  those words and keep the rest of what the user typed; the words are counted the way the
+  server counts them (whitespace and the alphabet's `@separators`). The demo page does that.
+* **Unknown words.** A lookup that contains a word the index has never seen is skipped, not
+  fatal: before, one unknown or misspelled word anywhere in the input meant no answer at all.
+* **Both lists.** The user's history list falls back the same way, independently of the global
+  one.
+* **Over-long input.** `/v1/complete` no longer answers `400` for an input over 32 words or
+  1024 bytes: only the end is used (cut at a character boundary, a half-cut first word is
+  dropped) and `input_truncated` is set. What is cut off is not validated; what is kept still
+  is, and a malformed kept part is still a `400`. Storing queries stays strict.
+* **Cost.** Each extra lookup is a real scan, but one scan budget (`--max-visited`,
+  `--max-user-visited`) is shared by all the lookups of a request, so the worst case does not
+  grow with the number of steps; if it runs out, the remaining steps are skipped and
+  `truncated` is set. Each step has its own cache entry, so the same last words typed after
+  different beginnings are served from the cache. A lookup whose complete words start no stored
+  query costs one trie probe, not a dictionary scan.
+* **Spell correction.** With `correct=1` only the words a lookup can use are corrected: the
+  last `tail` words of the input (the one being typed among them). Earlier words stay as typed.
+  With `tail=0` all complete words are corrected, as before.
+* **What it does not do.** It still matches stored queries that *start with* the words, as the
+  whole index does. `foxes ju` finds `foxes juggernaut`, not `the quick foxes jump`; that would
+  need a word-position-independent index (see `docs/PROPOSALS.md`).
+
+## Hot-prefix table
+
+Partial first words of one or two letters (`a`, `we`) are the most expensive lookups: there is
+nothing before them to narrow the scan, so they walk tens of thousands of entries and are
+approximate (`truncated`). The index keeps a **precomputed top list for each such prefix**
+(`--hot-prefix-letters 2`, `--hot-prefix-top 100`):
+
+* It is used when nothing but one partial first word of up to `--hot-prefix-letters` letters
+  is typed, `n` is at most `--hot-prefix-top` and `rank=frequency`. Everything else, and
+  `rank=avg_word_freq`, is scanned as before.
+* The answer is **exact** and nothing is scanned (`truncated` is false). The scan it replaces
+  considers 64 dictionary words and a visit budget. Ties are broken the same way (older id first).
+* It is derived data, built with one pass over the query trie at start-up, after a restart and
+  after `optimize`, never saved. Writes keep it current inside `add_global`,
+  `add_user(also_global)` and `remove_global`, under the engine's write lock, so readers need no
+  lock of their own. Each list holds twice `--hot-prefix-top` entries; if removals shorten a list
+  below what a request asks for, that lookup falls back to the scan (never to a wrong answer)
+  until a rebuild or a better query refills it.
+* The tail fallback with `min_tail=1` ends in exactly this lookup (the word being typed alone),
+  which is what makes that setting affordable.
+* `GET /v1/stats` reports `hot_lookups`, `hot_prefixes` and `hot_entries`. `--hot-prefix-letters 0`
+  switches it off. `qac complete` (one-off lookups) never builds it.
+* Memory: 8 bytes × 2 × `--hot-prefix-top` per prefix (1.6 KiB by default); there is one list
+  for each distinct 1…`--hot-prefix-letters` letter beginning of a first word that occurs in the
+  data (46 in the benchmark, 84 in the sample data). Start-up cost: one pass over all queries,
+  about 0.1 µs each.
+
+Measured with `qac_bench` on 300k synthetic queries (vocabulary 100k, GCC 13, **one** core and
+one thread, cache off, `--tail 0` where not about the tail; not comparable with the table in
+*Limits*, which was measured on another machine with other settings):
+
+| lookups of 1–2 letters of a first word (`--short-partials`) | lookups/s | p50 | p99 | `truncated` |
+|---|---|---|---|---|
+| `--hot-prefix-letters 0` (scan) | 1.5k | 440 µs | 2.1 ms | 100% |
+| `--hot-prefix-letters 2` | 607k | 1.4 µs | 3.7 µs | 0% |
+
+| tail fallback (`--hot-prefix-letters 2`) | lookups/s | p50 | p99 | no result |
+|---|---|---|---|---|
+| normal mix, `--tail 0` | 12.4k | 15 µs | 956 µs | 1.9% |
+| normal mix, `--tail 3` | 11.5k | 18 µs | 897 µs | 0.8% |
+| 5 random known words in front (`--junk-words 5`), `--tail 0` | 276k | 2.5 µs | 8 µs | 100% |
+| 5 random known words in front, `--tail 3` | 24k | 13 µs | 302 µs | 44% |
+
+The last two rows are the price of finding something instead of nothing: those lookups now do
+real scans. (The remaining 44% are inputs whose last three words still include the unrelated
+words, because the real part of the input was shorter than that.)
 
 ## Ranking by mean word frequency
 
@@ -197,7 +304,9 @@ English, Russian, German, Spanish and French letters and digits.
 
 ## Limits and trade-offs
 
-* **Hot and very short prefixes are answered approximately.** Top-N by frequency under a
+* **Hot and very short prefixes are answered approximately** (except a partial first word of
+  one or two letters, which the hot-prefix table answers exactly; the numbers below are from
+  before it existed). Top-N by frequency under a
   prefix means scanning that prefix's subtree; budgets (`--max-visited`,
   `--max-user-visited`, `--max-candidates`) bound the work and set `truncated`. For a partial
   last word only the 64 most frequent matching dictionary words are tried.
@@ -231,13 +340,14 @@ English, Russian, German, Spanish and French letters and digits.
   Inside a scan the time splits roughly as: hat-trie bucket iteration 27%, moving between trie
   nodes (binary search in the children map) 25%, top-N selection and hit construction 16%,
   key-prefix comparison 8%; the dictionary scan for a partial word is only about 3–7%. So the fix
-  is to scan less, not to tune the scan: a precomputed top-K per frequent first-word prefix
-  would turn those lookups into a merge of a few short lists, and also make them exact. The
+  is to scan less, not to tune the scan: that is what the hot-prefix table does for the first
+  two rows of the table above (see *Hot-prefix table*); the other shapes are still scanned. The
   result cache already absorbs the repeated head prefixes. The scan cost grows with the data: at
   hundreds of millions of queries a head word holds millions of entries, so the default budget
   (1M entries, tens of ms) will be reached for them.
 
-* Queries are limited to 32 words, 64 letters per word, 1024 bytes (configurable in `Limits`).
+* Stored queries are limited to 32 words, 64 letters per word, 1024 bytes (configurable in
+  `Limits`). A lookup is not refused for being longer; only its end is used (see *Long inputs*).
 * JamSpell is not guaranteed thread-safe by contract; the test-suite checks that concurrent
   `FixFragment` calls are consistent (8 threads), nothing more.
 * The server speaks plain HTTP; put TLS and authentication in a reverse proxy. The
@@ -246,7 +356,7 @@ English, Russian, German, Spanish and French letters and digits.
 ## Tests and tools
 
 ```sh
-ctest --test-dir build -j2        # 200+ tests: index (with brute-force oracles), text, WAL, snapshots, engine (fork and
+ctest --test-dir build -j2        # 240+ tests: index (with brute-force oracles), hot-prefix table, tail fallback, text, WAL, snapshots, engine (fork and
                                   # inline modes, crash, concurrency), train, REST, HTTP, JamSpell
 build/qac_bench --queries 1000000 # synthetic benchmark: training, lookups on 1/2/4 threads
 ```
@@ -263,6 +373,7 @@ src/main.cpp          the qac command
 cmake/jamspell/       build shim for the JamSpell fork (see the comment inside)
 web/index.html        demo page, compiled into the binary
 data/                 alphabet.txt, sample_queries.txt
+docs/PROPOSALS.md     ideas that were not implemented, with reasons
 tests/, bench/        GoogleTest suite and benchmark
 nix/, flake.nix       package, NixOS module, dev shell
 third_party/          submodules: hat-trie, jamspell, cereal, googletest

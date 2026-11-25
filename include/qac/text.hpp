@@ -40,6 +40,17 @@ class TextProcessor {
   ParseError parse_prefix(std::string_view utf8, std::vector<std::string>& complete,
                           std::string& partial, std::string* detail = nullptr) const;
 
+  // Like parse_prefix, but for text typed into a search box, where length is no reason to
+  // refuse a request: only the END of the input is examined. If it is longer than
+  // limits.max_input_bytes the front is cut off (at a character boundary, and the word that
+  // may have been cut in half goes with it); if it then has more than limits.max_words
+  // tokens, the first ones are dropped. `truncated` tells whether anything was dropped.
+  // What is dropped is not validated; what is kept is checked as in parse_prefix (invalid
+  // UTF-8, a character outside the alphabet, a word longer than max_word_letters).
+  ParseError parse_typed(std::string_view utf8, std::vector<std::string>& complete,
+                         std::string& partial, bool& truncated,
+                         std::string* detail = nullptr) const;
+
   // Encoded words -> UTF-8 text joined by single spaces.
   std::string render(const std::vector<std::string>& words) const;
 

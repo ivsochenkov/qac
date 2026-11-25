@@ -8,6 +8,7 @@
 #include <fstream>
 #include <list>
 #include <unordered_map>
+#include <unordered_set>
 
 #include <fcntl.h>
 #include <sys/syscall.h>
@@ -234,9 +235,21 @@ void Engine::open_directory() {
       fs::resize_file(res.torn_path, res.torn_offset, ec);
   }
   last_seq_ = reader.last_seq();
+  enable_hot_prefixes(*idx_);
 
   wal_ = std::make_unique<WalWriter>(cfg_.data_dir, fp, cfg_.fsync);
   wal_->open_segment(last_seq_ + 1);
+}
+
+void Engine::enable_hot_prefixes(Index& idx) const {
+  if (cfg_.hot_prefix_letters == 0) return;
+  const auto t0 = Clock::now();
+  idx.enable_hot_prefixes({cfg_.hot_prefix_letters, cfg_.hot_prefix_top});
+  const auto s = idx.stats();
+  log_info("hot-prefix table: " + std::to_string(s.hot_prefixes) + " prefixes, " +
+           std::to_string(s.hot_entries) + " entries, " +
+           std::to_string(std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - t0).count()) +
+           " ms");
 }
 
 void Engine::set_spell_fixer(std::shared_ptr<const SpellFixer> fixer) {
@@ -335,14 +348,20 @@ CompleteResult Engine::complete(const CompleteRequest& req) const {
   ++completes_;
   CompleteResult res;
 
+  // Only the end of an over-long input is used (see TextProcessor::parse_typed).
   std::vector<std::string> words;
   std::string partial, detail;
-  const ParseError pe = text_.parse_prefix(req.query, words, partial, &detail);
+  bool input_cut = false;
+  const ParseError pe = text_.parse_typed(req.query, words, partial, input_cut, &detail);
   if (pe != ParseError::None) {
     res.status = Status::BadInput;
     res.message = std::string(to_string(pe)) + (detail.empty() ? "" : ": " + detail);
     return res;
   }
+  res.input_truncated = input_cut;
+
+  const std::size_t tail = req.tail;
+  const std::size_t min_tail = tail == 0 ? 0 : std::clamp<std::size_t>(req.min_tail, 1, tail);
 
   if (req.correct) {
     std::shared_ptr<const SpellFixer> fixer;
@@ -355,16 +374,23 @@ CompleteResult Engine::complete(const CompleteRequest& req) const {
       res.message = "spell correction is not configured (start the server with --jamspell-model)";
       return res;
     }
-    if (!words.empty()) {
-      // Only complete words are corrected: the word being typed is unfinished.
+    // Only complete words are corrected: the word being typed is unfinished. With the tail
+    // fallback on, only the words a lookup can use are corrected: the last `tail` words of
+    // the input, the word being typed among them. Earlier words are left as typed.
+    const std::size_t room = tail == 0 ? words.size() : (partial.empty() ? tail : tail - 1);
+    const std::size_t first = words.size() > room ? words.size() - room : 0;
+    if (first < words.size()) {
+      const std::vector<std::string> window(words.begin() + static_cast<std::ptrdiff_t>(first),
+                                            words.end());
       try {
-        const std::string fixed = fixer->fix(text_.render(words));
+        const std::string fixed = fixer->fix(text_.render(window));
         std::vector<std::string> fixed_words;
         std::string fixed_partial;
         // A correction that leaves the alphabet or yields nothing is ignored.
         if (text_.parse_prefix(fixed + " ", fixed_words, fixed_partial) == ParseError::None &&
-            fixed_partial.empty() && !fixed_words.empty() && fixed_words != words) {
-          words = std::move(fixed_words);
+            fixed_partial.empty() && !fixed_words.empty() && fixed_words != window) {
+          words.erase(words.begin() + static_cast<std::ptrdiff_t>(first), words.end());
+          words.insert(words.end(), fixed_words.begin(), fixed_words.end());
           std::string shown = text_.render(words);
           if (!partial.empty()) shown += " " + alphabet_.decode_word(partial);
           res.corrected = std::move(shown);
@@ -378,53 +404,126 @@ CompleteResult Engine::complete(const CompleteRequest& req) const {
   std::shared_lock<RWLock> lock(mu_);
   const Index& idx = *idx_;
 
-  std::vector<WordId> ids;
-  ids.reserve(words.size());
-  bool known = true;
-  for (const auto& w : words) {
-    const auto id = idx.find_word(w);
-    if (!id) {
-      known = false;
-      break;
+  std::vector<std::optional<WordId>> word_ids;
+  word_ids.reserve(words.size());
+  for (const auto& w : words) word_ids.push_back(idx.find_word(w));
+
+  // The lookups, most specific first: the whole input, then its last `tail` words, one word
+  // fewer each time, down to `min_tail`. The word being typed counts as the last word. A
+  // tail as long as the input would repeat the first lookup and is left out.
+  struct Tier {
+    std::size_t skip;     // words of the input (the typed one last) left out at the front
+    std::size_t matched;  // words used
+  };
+  const std::size_t total = words.size() + (partial.empty() ? 0 : 1);
+  std::vector<Tier> tiers{{0, total}};
+  if (tail > 0 && total > 1) {
+    for (std::size_t k = std::min(tail, total - 1); k >= min_tail; --k) {
+      tiers.push_back({total - k, k});
+      if (k == 1) break;
     }
-    ids.push_back(*id);
   }
 
-  Index::ScanStats stats;
-  if (known) {
-    if (req.n > 0) {
-      std::string key;
-      for (const auto& w : words) {
-        key += w;
-        key.push_back('\0');
-      }
-      key.push_back('\1');
-      key += partial;
+  const auto cache_key = [&](const Tier& t) {
+    std::string key;
+    for (std::size_t i = t.skip; i < words.size(); ++i) {
+      key += words[i];
       key.push_back('\0');
-      key += std::to_string(req.n);
-      key.push_back('\2');
-      key.push_back(static_cast<char>('0' + static_cast<int>(req.rank)));
+    }
+    key.push_back('\1');
+    key += partial;
+    key.push_back('\0');
+    key += std::to_string(req.n);
+    key.push_back('\2');
+    key.push_back(static_cast<char>('0' + static_cast<int>(req.rank)));
+    return key;
+  };
 
+  // One scan budget for the whole request, however many lookups it takes.
+  std::size_t global_budget = cfg_.scan.max_visited;
+  std::size_t user_budget = cfg_.scan.max_user_visited;
+  bool global_ran = false, user_ran = false;  // a scan has used the budget (the first always runs)
+  bool truncated = false;
+  std::unordered_set<QueryId> seen_global, seen_user;
+  std::vector<WordId> ids;
+
+  for (const Tier& t : tiers) {
+    const bool need_global = req.n > 0 && res.global.size() < req.n;
+    const bool need_user = req.user && req.m > 0 && res.user.size() < req.m;
+    if (!need_global && !need_user) break;
+
+    // A lookup with a word the index has never seen cannot match anything.
+    ids.clear();
+    bool known = true;
+    for (std::size_t i = t.skip; i < words.size(); ++i) {
+      if (!word_ids[i]) {
+        known = false;
+        break;
+      }
+      ids.push_back(*word_ids[i]);
+    }
+    if (!known) continue;
+
+    if (need_global) {
+      std::string key = cache_key(t);
+      std::vector<Suggestion> hits;
+      bool hits_truncated = false;
       ResultCache::Entry entry;
       if (cache_->get(key, entry)) {
-        res.global = std::move(entry.hits);
-        stats.truncated = entry.truncated;
+        hits = std::move(entry.hits);
+        hits_truncated = entry.truncated;
+      } else if (global_budget == 0 && global_ran) {
+        truncated = true;  // the earlier lookups used it all
       } else {
+        const bool whole_budget = global_budget == cfg_.scan.max_visited;
+        Index::ScanLimits lim = cfg_.scan;
+        lim.max_visited = global_budget;
+        Index::ScanStats st;
         const bool avg = req.rank == Index::GlobalRank::AverageWordFrequency;
-        for (const auto& h : idx.top_global(ids, partial, req.n, cfg_.scan, stats, req.rank)) {
-          Suggestion sg{h.id, render_query(idx, h.id), h.freq, 0, std::nullopt};
+        for (const auto& h : idx.top_global(ids, partial, req.n, lim, st, req.rank)) {
+          Suggestion sg{h.id, render_query(idx, h.id), h.freq, 0, std::nullopt, 0};
           if (avg) sg.score = h.average();
-          res.global.push_back(std::move(sg));
+          hits.push_back(std::move(sg));
         }
-        cache_->put(std::move(key), ResultCache::Entry{res.global, stats.truncated});
+        global_ran = true;
+        global_budget -= std::min(global_budget, st.scanned);
+        if (st.hot) ++hot_lookups_;
+        hits_truncated = st.truncated;
+        // A lookup cut short by a budget that earlier lookups had already eaten into must not
+        // stand in for the same lookup with a whole budget.
+        if (whole_budget || !st.truncated)
+          cache_->put(std::move(key), ResultCache::Entry{hits, st.truncated});
+      }
+      truncated = truncated || hits_truncated;
+      for (auto& h : hits) {
+        if (res.global.size() >= req.n) break;
+        if (!seen_global.insert(h.id).second) continue;  // already listed by a longer lookup
+        h.matched_words = static_cast<std::uint32_t>(t.matched);
+        res.global.push_back(std::move(h));
       }
     }
-    if (req.user && req.m > 0) {
-      for (const auto& h : idx.top_user(*req.user, ids, partial, req.m, cfg_.scan, stats))
-        res.user.push_back({h.id, render_query(idx, h.id), h.freq, h.last_used, std::nullopt});
+
+    if (need_user) {
+      if (user_budget == 0 && user_ran) {
+        truncated = true;
+      } else {
+        Index::ScanLimits lim = cfg_.scan;
+        lim.max_user_visited = user_budget;
+        Index::ScanStats st;
+        for (const auto& h : idx.top_user(*req.user, ids, partial, req.m, lim, st)) {
+          if (res.user.size() >= req.m) break;
+          if (!seen_user.insert(h.id).second) continue;
+          res.user.push_back({h.id, render_query(idx, h.id), h.freq, h.last_used, std::nullopt,
+                              static_cast<std::uint32_t>(t.matched)});
+        }
+        user_ran = true;
+        user_budget -= std::min(user_budget, st.scanned);
+        truncated = truncated || st.truncated;
+      }
     }
   }
-  res.truncated = stats.truncated;
+
+  res.truncated = truncated;
   res.took_us = static_cast<std::uint64_t>(
       std::chrono::duration_cast<std::chrono::microseconds>(Clock::now() - t0).count());
   return res;
@@ -583,6 +682,7 @@ MaintenanceResult Engine::run_maintenance(bool compact) {
         info = write_snapshot(tmp, compacted, seq, fp);
         fs::rename(tmp, final_path);
         fsync_directory(cfg_.data_dir);
+        enable_hot_prefixes(compacted);
         idx_ = std::make_unique<Index>(std::move(compacted));
         cache_->clear();
       } else {
@@ -639,6 +739,7 @@ MaintenanceResult Engine::run_maintenance(bool compact) {
         if (loaded.info.last_seq != seq) throw std::runtime_error("optimized snapshot has wrong sequence");
         auto fresh = std::make_unique<Index>(std::move(loaded.index));
         info = loaded.info;
+        enable_hot_prefixes(*fresh);  // before the catch-up: the writes below keep it current
 
         WalReader tail(cfg_.data_dir, fp, seq);
         const auto apply = [&](const WalRecord& r) { apply_record(*fresh, r); };
@@ -696,6 +797,7 @@ EngineStats Engine::stats() const {
   s.cache_hits = cache_->hits();
   s.cache_misses = cache_->misses();
   s.completes = completes_.load();
+  s.hot_lookups = hot_lookups_.load();
   s.writes = writes_.load();
   s.maintenance_running = maint_running_.load();
   s.uptime_s = static_cast<std::uint64_t>(

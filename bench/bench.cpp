@@ -89,6 +89,9 @@ Percentiles percentiles(std::vector<double>& v) {
 int main(int argc, char** argv) {
   std::size_t queries = 1'000'000, vocab = 200'000, lookups = 200'000, cache = 0;
   std::string rank = "frequency";
+  unsigned hot_letters = 2;
+  std::size_t tail = 3, min_tail = 2, junk_words = 0;
+  bool short_partials = false;
   std::string threads_arg = "1,2,4", dir, alphabet_path = QAC_BENCH_ALPHABET;
   po::options_description d("Options");
   d.add_options()("queries", po::value(&queries)->default_value(queries), "distinct queries to generate")
@@ -97,6 +100,14 @@ int main(int argc, char** argv) {
       ("threads", po::value(&threads_arg)->default_value(threads_arg), "comma separated thread counts")
       ("rank", po::value(&rank)->default_value(rank), "frequency | avg_word_freq")
       ("cache", po::value(&cache)->default_value(cache), "result cache entries (0: off, measures the index itself)")
+      ("hot-prefix-letters", po::value(&hot_letters)->default_value(hot_letters),
+       "hot-prefix table: partial first words of up to N letters are precomputed (0: off)")
+      ("tail", po::value(&tail)->default_value(tail), "tail fallback: retry with the last N words (0: off)")
+      ("min-tail", po::value(&min_tail)->default_value(min_tail), "fewest words the tail may shrink to")
+      ("junk-words", po::value(&junk_words)->default_value(junk_words),
+       "put this many random known words in front of every lookup (a long input that matches nothing as a whole)")
+      ("short-partials", po::bool_switch(&short_partials),
+       "only look up 1-2 letters of a first word (the shape the hot-prefix table serves)")
       ("dir", po::value(&dir), "working directory (default: a temporary one)")
       ("alphabet", po::value(&alphabet_path)->default_value(alphabet_path), "alphabet file")
       ("help,h", "this help");
@@ -164,6 +175,7 @@ int main(int argc, char** argv) {
   ec.snapshot_interval_s = 0;
   ec.snapshot_wal_bytes = 0;
   ec.cache_entries = cache;  // off by default: measure the index, not the cache
+  ec.hot_prefix_letters = hot_letters;
   const auto t1 = Clock::now();
   Engine engine(alphabet, ec);
   std::printf("load:     %.2f s, resident %.1f MiB, tables %.1f MiB\n", seconds(t1, Clock::now()),
@@ -181,11 +193,25 @@ int main(int argc, char** argv) {
     return q.substr(0, cut);
   };
 
-  std::printf("\n%-8s %12s %10s %10s %10s %10s %10s\n", "threads", "lookups/s", "p50 us", "p95 us", "p99 us", "max us",
-              "truncated");
+  const auto make_typed = [&](std::mt19937_64& r) {
+    if (short_partials) {
+      const std::string& q = sample_queries[r() % sample_queries.size()];
+      return q.substr(0, std::min<std::size_t>(1 + r() % 2, q.find(' ')));
+    }
+    std::string typed = make_prefix(r);
+    if (junk_words > 0) {
+      std::string head;
+      for (std::size_t k = 0; k < junk_words; ++k) head += words[r() % words.size()] + ' ';
+      typed = head + typed;
+    }
+    return typed;
+  };
+
+  std::printf("\n%-8s %12s %10s %10s %10s %10s %10s %10s\n", "threads", "lookups/s", "p50 us", "p95 us", "p99 us",
+              "max us", "truncated", "no result");
   for (unsigned threads : thread_counts) {
     std::vector<std::vector<double>> lat(threads);
-    std::atomic<std::uint64_t> truncated{0};
+    std::atomic<std::uint64_t> truncated{0}, empty{0};
     const std::size_t per_thread = lookups / threads;
     const auto start = Clock::now();
     std::vector<std::thread> pool;
@@ -195,13 +221,16 @@ int main(int argc, char** argv) {
         lat[t].reserve(per_thread);
         for (std::size_t i = 0; i < per_thread; ++i) {
           CompleteRequest req;
-          req.query = make_prefix(r);
+          req.query = make_typed(r);
           req.n = 10;
+          req.tail = tail;
+          req.min_tail = min_tail;
           if (rank == "avg_word_freq") req.rank = Index::GlobalRank::AverageWordFrequency;
           const auto a = Clock::now();
           const CompleteResult res = engine.complete(req);
           lat[t].push_back(std::chrono::duration<double, std::micro>(Clock::now() - a).count());
           if (res.truncated) ++truncated;
+          if (res.global.empty()) ++empty;
         }
       });
     for (auto& th : pool) th.join();
@@ -209,10 +238,15 @@ int main(int argc, char** argv) {
     std::vector<double> all;
     for (auto& v : lat) all.insert(all.end(), v.begin(), v.end());
     const Percentiles p = percentiles(all);
-    std::printf("%-8u %12.0f %10.1f %10.1f %10.1f %10.1f %9.2f%%\n", threads,
+    std::printf("%-8u %12.0f %10.1f %10.1f %10.1f %10.1f %9.2f%% %9.2f%%\n", threads,
                 static_cast<double>(all.size()) / wall, p.p50, p.p95, p.p99, p.max,
-                100.0 * static_cast<double>(truncated.load()) / static_cast<double>(all.size()));
+                100.0 * static_cast<double>(truncated.load()) / static_cast<double>(all.size()),
+                100.0 * static_cast<double>(empty.load()) / static_cast<double>(all.size()));
   }
+
+  std::printf("(hot-prefix lookups: %llu, hot-prefix table: %llu prefixes)\n",
+              static_cast<unsigned long long>(engine.stats().hot_lookups),
+              static_cast<unsigned long long>(engine.stats().index.hot_prefixes));
 
   // ---- writes ----
   {

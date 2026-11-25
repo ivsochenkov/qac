@@ -1,6 +1,7 @@
 // REST API on top of the Engine, independent of any transport.
 //
 //   GET    /v1/complete?q=<text>[&n=10][&user=<id>&m=5][&correct=1][&rank=frequency|avg_word_freq]
+//                              [&tail=3][&min_tail=2]
 //   POST   /v1/queries                       {"query": "...", "count": 1}
 //   POST   /v1/users/{user}/queries          {"query": "...", "count": 1, "also_global": false}
 //   DELETE /v1/queries/{id}
@@ -37,6 +38,10 @@ struct ApiResponse {
 struct ApiConfig {
   std::size_t max_n = 100;  // upper bound for n and m
   std::size_t max_m = 100;
+  // Tail fallback of /v1/complete when a request does not say: try the last `tail` words
+  // (0: never), down to `min_tail` words. See CompleteRequest.
+  std::size_t default_tail = 3;
+  std::size_t default_min_tail = 2;
   bool cors = false;        // Access-Control-Allow-Origin: *
   bool allow_admin = true;  // /v1/snapshot and /v1/optimize
   std::string_view demo_page;  // served at "/" when not empty

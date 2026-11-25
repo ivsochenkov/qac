@@ -184,6 +184,7 @@ json::object suggestion_json(const Suggestion& s, bool user) {
   json::object o{{"id", s.id}, {"text", s.text}, {"freq", s.freq}};
   if (user) o["last_used"] = s.last_used;
   if (s.score) o["score"] = *s.score;
+  o["matched_words"] = s.matched_words;
   return o;
 }
 
@@ -242,6 +243,8 @@ ApiResponse Api::handle(const ApiRequest& req) const {
         resp = method_not_allowed("GET");
       } else {
         CompleteRequest cr;
+        cr.tail = cfg_.default_tail;
+        cr.min_tail = cfg_.default_min_tail;
         std::string bad;
         const std::string* q = find_param(t, "q");
         if (!q) {
@@ -260,6 +263,16 @@ ApiResponse Api::handle(const ApiRequest& req) const {
         };
         number("n", cfg_.max_n, cr.n);
         number("m", cfg_.max_m, cr.m);
+        const std::size_t max_words = engine_.text().limits().max_words;
+        number("tail", max_words, cr.tail);
+        const bool min_tail_given = find_param(t, "min_tail") != nullptr;
+        number("min_tail", max_words, cr.min_tail);
+        if (bad.empty() && min_tail_given && cr.min_tail == 0)
+          bad = "\"min_tail\" must be at least 1";
+        else if (bad.empty() && min_tail_given && cr.tail > 0 && cr.min_tail > cr.tail)
+          bad = "\"min_tail\" must not be larger than \"tail\"";
+        else if (!min_tail_given && cr.tail > 0 && cr.min_tail > cr.tail)
+          cr.min_tail = cr.tail;  // a short tail with the default floor
         if (const auto* u = find_param(t, "user")) {
           std::uint32_t v = 0;
           if (!parse_u32(*u, v))
@@ -290,6 +303,7 @@ ApiResponse Api::handle(const ApiRequest& req) const {
             json::object o{{"global", std::move(g)}, {"user", std::move(u)},
                            {"truncated", r.truncated}, {"took_us", r.took_us}};
             if (r.corrected) o["corrected"] = *r.corrected;
+            if (r.input_truncated) o["input_truncated"] = true;
             resp = json_response(200, o);
           }
         }
@@ -362,6 +376,9 @@ ApiResponse Api::handle(const ApiRequest& req) const {
                               {"cache_hits", s.cache_hits},
                               {"cache_misses", s.cache_misses},
                               {"completes", s.completes},
+                              {"hot_lookups", s.hot_lookups},
+                              {"hot_prefixes", s.index.hot_prefixes},
+                              {"hot_entries", s.index.hot_entries},
                               {"writes", s.writes},
                               {"recovered_records", s.recovered_records},
                               {"maintenance_running", s.maintenance_running},

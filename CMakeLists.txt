@@ -27,7 +27,7 @@ endif()
 # Dependencies
 # ---------------------------------------------------------------------------
 find_package(Threads REQUIRED)
-find_package(Boost 1.75 REQUIRED COMPONENTS program_options json)
+find_package(Boost 1.75 REQUIRED CONFIG COMPONENTS program_options json)
 
 foreach(dep hat-trie cereal)
   if(NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/third_party/${dep}")

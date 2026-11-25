@@ -119,6 +119,70 @@ ParseError TextProcessor::parse_prefix(std::string_view utf8, std::vector<std::s
   return ParseError::None;
 }
 
+ParseError TextProcessor::parse_typed(std::string_view utf8, std::vector<std::string>& complete,
+                                      std::string& partial, bool& truncated,
+                                      std::string* detail) const {
+  complete.clear();
+  partial.clear();
+  truncated = false;
+
+  // Only the last max_input_bytes bytes are looked at. Move the cut forward to the start of
+  // a character so that the kept text is still valid UTF-8 if the input was.
+  bool cut_bytes = false;
+  if (utf8.size() > limits_.max_input_bytes) {
+    std::size_t start = utf8.size() - limits_.max_input_bytes;
+    while (start < utf8.size() && (static_cast<unsigned char>(utf8[start]) & 0xC0) == 0x80) ++start;
+    utf8.remove_prefix(start);
+    cut_bytes = true;
+    truncated = true;
+  }
+
+  std::u32string text;
+  if (!utf8::decode(utf8, text)) return ParseError::InvalidUtf8;
+  if (text.empty()) return ParseError::None;
+  const bool ends_sep = alphabet_->is_separator(text.back());
+
+  std::vector<std::u32string> tokens;
+  const U32Tokenizer tokenizer(text.cbegin(), text.cend(), SeparatorFunc(alphabet_));
+  for (const std::u32string& tok : tokenizer) tokens.push_back(tok);
+
+  // The first token of a cut text may be the end of a word that was cut in half.
+  if (cut_bytes && tokens.size() > 1) tokens.erase(tokens.begin());
+  if (tokens.size() > limits_.max_words) {
+    tokens.erase(tokens.begin(), tokens.end() - static_cast<std::ptrdiff_t>(limits_.max_words));
+    truncated = true;
+  }
+
+  std::string encoded;
+  for (const std::u32string& tok : tokens) {
+    if (tok.size() > limits_.max_word_letters) {
+      complete.clear();
+      if (detail) *detail = "word longer than " + std::to_string(limits_.max_word_letters) + " letters";
+      return ParseError::TooLong;
+    }
+    if (!alphabet_->encode_word(tok, encoded)) {
+      complete.clear();
+      if (detail) {
+        for (char32_t cp : tok) {
+          if (alphabet_->code(cp) == 0) {
+            std::string ch;
+            utf8::append(cp, ch);
+            *detail = "character '" + ch + "' is not in the alphabet";
+            break;
+          }
+        }
+      }
+      return ParseError::UnknownCharacter;
+    }
+    complete.push_back(encoded);
+  }
+  if (!ends_sep && !complete.empty()) {
+    partial = std::move(complete.back());
+    complete.pop_back();
+  }
+  return ParseError::None;
+}
+
 std::string TextProcessor::render(const std::vector<std::string>& words) const {
   std::string out;
   for (std::size_t i = 0; i < words.size(); ++i) {

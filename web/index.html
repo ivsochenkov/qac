@@ -74,6 +74,8 @@
     <label>user id <input id="user" type="number" min="0" max="4294967295" placeholder="none"></label>
     <label>top&#8209;N <input id="n" type="number" min="0" max="100" value="10"></label>
     <label>top&#8209;M <input id="m" type="number" min="0" max="100" value="5"></label>
+    <label title="When the whole text finds too little, retry with only its last N words (0: off)">tail words <input id="tail" type="number" min="0" max="32" value="3"></label>
+    <label title="The fewest words the tail may shrink to">down to <input id="minTail" type="number" min="1" max="32" value="2"></label>
     <label><input id="correct" type="checkbox"> spell correction</label>
     <label>global ranking
       <select id="rank" title="How the global suggestions are ordered">
@@ -101,6 +103,7 @@
 (() => {
   const $ = (id) => document.getElementById(id);
   const q = $('q'), userEl = $('user'), nEl = $('n'), mEl = $('m'), correctEl = $('correct'), rankEl = $('rank');
+  const tailEl = $('tail'), minTailEl = $('minTail');
   const lists = { global: $('global'), user: $('userList') };
   let timer = 0, seq = 0, rows = [], sel = -1;
 
@@ -116,6 +119,18 @@
     try { data = await res.json(); } catch (_) { /* no body */ }
     if (!res.ok) throw new Error((data && data.message) || ('HTTP ' + res.status));
     return data;
+  }
+
+  // Words of the typed text, with their positions. The separators are the ones of the server's
+  // alphabet (data/alphabet.txt, @separators) plus whitespace; the server counts words the same way.
+  const WORD = /[^\s.,;:!?¿¡()\[\]{}"«»„“”\/\\|\-–—_&@#$%*+=<>~^`…·]+/g;
+  const wordsOf = (text) => Array.from(text.matchAll(WORD), (m) => ({ start: m.index, end: m.index + m[0].length }));
+
+  // A suggestion that matched only the last `matched` words of the input replaces just those.
+  function applied(text, matched) {
+    const words = wordsOf(q.value);
+    const keep = matched > 0 && matched < words.length ? q.value.slice(0, words[words.length - matched].start) : '';
+    return keep + text + ' ';
   }
 
   function render(pool, items, meta) {
@@ -134,10 +149,18 @@
       const x = document.createElement('button'); x.className = 'x'; x.type = 'button';
       x.textContent = '✕'; x.title = 'Remove this query'; x.setAttribute('aria-label', 'Remove ' + it.text);
       x.addEventListener('click', (e) => { e.stopPropagation(); remove(pool, it); });
-      li.append(t, f, x);
-      li.addEventListener('click', () => accept(it.text));
+      const typed = wordsOf(q.value).length;
+      if (it.matched_words > 0 && it.matched_words < typed) {
+        const b = document.createElement('span'); b.className = 'f';
+        b.textContent = 'last ' + it.matched_words + (it.matched_words === 1 ? ' word' : ' words');
+        b.title = 'Only the last ' + it.matched_words + ' words of the input matched; accepting replaces just those';
+        li.append(t, b, f, x);
+      } else {
+        li.append(t, f, x);
+      }
+      li.addEventListener('click', () => accept(it.text, it.matched_words));
       ul.append(li);
-      rows.push({ li, text: it.text });
+      rows.push({ li, text: it.text, matched: it.matched_words });
     }
   }
 
@@ -147,7 +170,7 @@
     if (sel >= 0) { rows[sel].li.setAttribute('aria-selected', 'true'); rows[sel].li.scrollIntoView({ block: 'nearest' }); }
   }
 
-  function accept(text) { q.value = text + ' '; q.focus(); refresh(); }
+  function accept(text, matched) { q.value = applied(text, matched); q.focus(); refresh(); }
 
   async function refresh() {
     const mine = ++seq;
@@ -155,6 +178,10 @@
     if (userId() !== null) p.set('user', userId());
     if (correctEl.checked) p.set('correct', '1');
     if (rankEl.value !== 'frequency') p.set('rank', rankEl.value);
+    const tail = Math.max(0, parseInt(tailEl.value, 10) || 0);
+    const minTail = Math.max(1, parseInt(minTailEl.value, 10) || 1);
+    p.set('tail', String(tail));
+    if (tail > 0) p.set('min_tail', String(Math.min(minTail, tail)));
     try {
       const r = await api('GET', '/v1/complete?' + p);
       if (mine !== seq) return;  // a newer request is already on its way
@@ -165,6 +192,7 @@
       $('uMeta').textContent = r.user.length && userId() !== null ? String(r.user.length) : '';
       let msg = '', kind = '';
       if (r.corrected) msg = 'Showing results for “' + r.corrected + '”';
+      if (r.input_truncated) msg += (msg ? ' · ' : '') + 'long input: only its end was used';
       if (r.truncated) msg += (msg ? ' · ' : '') + 'approximate: a scan budget ran out';
       note(msg, kind);
     } catch (e) {
@@ -209,10 +237,10 @@
   q.addEventListener('keydown', (e) => {
     if (e.key === 'ArrowDown') { e.preventDefault(); select(sel + 1); }
     else if (e.key === 'ArrowUp') { e.preventDefault(); select(sel - 1); }
-    else if (e.key === 'Tab' && sel >= 0) { e.preventDefault(); accept(rows[sel].text); }
-    else if (e.key === 'Enter') { e.preventDefault(); sel >= 0 ? accept(rows[sel].text) : add('user'); }
+    else if (e.key === 'Tab' && sel >= 0) { e.preventDefault(); accept(rows[sel].text, rows[sel].matched); }
+    else if (e.key === 'Enter') { e.preventDefault(); sel >= 0 ? accept(rows[sel].text, rows[sel].matched) : add('user'); }
   });
-  for (const el of [userEl, nEl, mEl, correctEl, rankEl]) el.addEventListener('change', refresh);
+  for (const el of [userEl, nEl, mEl, tailEl, minTailEl, correctEl, rankEl]) el.addEventListener('change', refresh);
   $('addGlobal').addEventListener('click', () => add('global'));
   $('snap').addEventListener('click', () => admin('/v1/snapshot', 'Snapshot'));
   $('opt').addEventListener('click', () => admin('/v1/optimize', 'Optimize'));

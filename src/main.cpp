@@ -238,7 +238,15 @@ int cmd_serve(const std::vector<std::string>& args) {
       ("cache-ttl-ms", po::value(&ec.cache_ttl_ms)->default_value(ec.cache_ttl_ms), "cache entry lifetime")
       ("max-visited", po::value(&ec.scan.max_visited)->default_value(ec.scan.max_visited), "global scan budget (queries visited)")
       ("max-user-visited", po::value(&ec.scan.max_user_visited)->default_value(ec.scan.max_user_visited), "user scan budget")
-      ("max-candidates", po::value(&ec.scan.max_candidates)->default_value(ec.scan.max_candidates), "dictionary words tried for a partial last word");
+      ("max-candidates", po::value(&ec.scan.max_candidates)->default_value(ec.scan.max_candidates), "dictionary words tried for a partial last word")
+      ("tail", po::value(&ac.default_tail)->default_value(ac.default_tail),
+       "default tail fallback: with too few matches retry with the last N words (0: off); a request can override it with tail=")
+      ("min-tail", po::value(&ac.default_min_tail)->default_value(ac.default_min_tail),
+       "default for the fewest words the tail may shrink to (request parameter min_tail)")
+      ("hot-prefix-letters", po::value(&ec.hot_prefix_letters)->default_value(ec.hot_prefix_letters),
+       "precompute top lists for partial first words of up to N letters, 1-4 (0: off)")
+      ("hot-prefix-top", po::value(&ec.hot_prefix_top)->default_value(ec.hot_prefix_top),
+       "largest n the hot-prefix table can answer (it keeps twice as many entries per prefix)");
   desc.add(tune);
 
   bool help = false;
@@ -303,6 +311,7 @@ Engine open_offline(const Common& c, const Alphabet& alphabet) {
   ec.snapshot_interval_s = 0;
   ec.snapshot_wal_bytes = 0;
   ec.cache_entries = 0;
+  ec.hot_prefix_letters = 0;  // one lookup does not pay for building the table
   return Engine(alphabet, ec);
 }
 
@@ -313,6 +322,7 @@ int cmd_complete(const std::vector<std::string>& args) {
   std::uint32_t user = 0;
   bool has_user = false, correct = false;
   std::string rank = "frequency";
+  std::size_t tail = CompleteRequest{}.tail, min_tail = CompleteRequest{}.min_tail;
   po::options_description desc;
   desc.add(common_options(c, true));
   po::options_description own("Lookup options");
@@ -323,7 +333,11 @@ int cmd_complete(const std::vector<std::string>& args) {
       ("top-m,m", po::value(&m)->default_value(m), "top-M from the user's history")
       ("correct", po::bool_switch(&correct), "spell-correct the complete words (needs --jamspell-model)")
       ("rank", po::value(&rank)->default_value(rank),
-       "order of the global candidates: frequency | avg_word_freq (mean frequency of the words of each candidate)");
+       "order of the global candidates: frequency | avg_word_freq (mean frequency of the words of each candidate)")
+      ("tail", po::value(&tail)->default_value(tail),
+       "when the whole text finds too little, retry with only its last N words (0: never)")
+      ("min-tail", po::value(&min_tail)->default_value(min_tail),
+       "the fewest words the tail may shrink to");
   desc.add(own);
   bool help = false;
   const auto vm = parse("complete", args, desc, help);
@@ -339,6 +353,8 @@ int cmd_complete(const std::vector<std::string>& args) {
   req.n = n;
   req.m = m;
   req.correct = correct;
+  req.tail = tail;
+  req.min_tail = min_tail;
   if (rank == "avg_word_freq") req.rank = Index::GlobalRank::AverageWordFrequency;
   else if (rank != "frequency") throw UsageError("--rank must be frequency or avg_word_freq");
   if (has_user) req.user = user;
@@ -349,12 +365,14 @@ int cmd_complete(const std::vector<std::string>& args) {
     std::cout << title << " (" << v.size() << ")\n";
     for (const auto& s : v) {
       std::cout << "  " << std::setw(10) << s.freq << "  #" << s.id << "  " << s.text;
+      if (s.matched_words != 0) std::cout << "   [last " << s.matched_words << " words]";
       if (s.score) std::cout << "   (avg word freq " << std::fixed << std::setprecision(1) << *s.score << ")";
       std::cout << "\n";
     }
   };
   print("global", r.global);
   if (has_user) print("user", r.user);
+  if (r.input_truncated) std::cout << "note: the text was longer than the limits, only its end was used\n";
   if (r.truncated) std::cout << "note: a scan budget ran out, results may be approximate\n";
   std::cout << "took " << r.took_us << " us\n";
   return 0;

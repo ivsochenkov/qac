@@ -9,6 +9,8 @@ add_subdirectory(${PROJECT_SOURCE_DIR}/third_party/googletest googletest EXCLUDE
 
 set(QAC_TEST_SOURCES
   test_index.cpp
+  test_hot.cpp
+  test_tail.cpp
   test_text.cpp
   test_wal.cpp
   test_engine.cpp

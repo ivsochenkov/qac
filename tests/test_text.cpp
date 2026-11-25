@@ -242,3 +242,115 @@ TEST_F(TextTest, PrefixRejectsForeignCharacters) {
   EXPECT_EQ(tp.parse_prefix("new 日", words, partial), ParseError::UnknownCharacter);
   EXPECT_TRUE(words.empty());
 }
+
+// ================================================================== parse_typed
+
+namespace {
+std::vector<std::string> enc_all(const Alphabet& a, std::initializer_list<const char*> words) {
+  std::vector<std::string> out;
+  for (const char* w : words) out.push_back(enc(a, w));
+  return out;
+}
+}  // namespace
+
+TEST(ParseTyped, BehavesLikeParsePrefixOnNormalInput) {
+  const TextProcessor tp(real_alphabet());
+  for (const char* typed : {"", "   ", "new york", "new york ", "NEW, YORK!", "a", "a ", "привет мир"}) {
+    std::vector<std::string> w1, w2;
+    std::string p1, p2;
+    bool cut = true;
+    ASSERT_EQ(tp.parse_prefix(typed, w1, p1), ParseError::None) << typed;
+    ASSERT_EQ(tp.parse_typed(typed, w2, p2, cut), ParseError::None) << typed;
+    EXPECT_EQ(w1, w2) << typed;
+    EXPECT_EQ(p1, p2) << typed;
+    EXPECT_FALSE(cut) << typed;
+  }
+}
+
+TEST(ParseTyped, KeepsOnlyTheLastMaxWordsWords) {
+  Limits l;
+  l.max_words = 3;
+  const TextProcessor tp(real_alphabet(), l);
+  const Alphabet& a = real_alphabet();
+
+  std::vector<std::string> words;
+  std::string partial, detail;
+  bool cut = false;
+  ASSERT_EQ(tp.parse_typed("one two three four five ", words, partial, cut), ParseError::None);
+  EXPECT_EQ(words, enc_all(a, {"three", "four", "five"}));
+  EXPECT_TRUE(partial.empty());
+  EXPECT_TRUE(cut);
+
+  ASSERT_EQ(tp.parse_typed("one two three four five", words, partial, cut), ParseError::None);
+  EXPECT_EQ(words, enc_all(a, {"three", "four"}));
+  EXPECT_EQ(partial, enc(a, "five"));  // the word being typed is still the last token
+  EXPECT_TRUE(cut);
+
+  // exactly at the limit nothing is dropped
+  ASSERT_EQ(tp.parse_typed("one two three ", words, partial, cut), ParseError::None);
+  EXPECT_EQ(words.size(), 3u);
+  EXPECT_FALSE(cut);
+
+  // parse_prefix, used for everything that is stored, stays strict
+  EXPECT_EQ(tp.parse_prefix("one two three four five ", words, partial), ParseError::TooManyWords);
+}
+
+TEST(ParseTyped, CutsOverLongInputAtACharacterBoundary) {
+  Limits l;
+  l.max_input_bytes = 24;
+  const Alphabet& a = real_alphabet();
+  // 52 bytes of 2-byte letters; the cut lands on, or inside, the second "привет"
+  const std::string typed = "привет мир привет мир привет";
+  ASSERT_EQ(typed.size(), 52u);
+  for (std::size_t limit : {24u, 23u, 22u}) {
+    l.max_input_bytes = limit;
+    const TextProcessor tp(a, l);
+    std::vector<std::string> words;
+    std::string partial;
+    bool cut = false;
+    ASSERT_EQ(tp.parse_typed(typed, words, partial, cut), ParseError::None) << limit;
+    // the first token of the cut text is a fragment ("ет", "т"...) and is dropped
+    EXPECT_EQ(words, enc_all(a, {"мир"})) << limit;
+    EXPECT_EQ(partial, enc(a, "привет")) << limit;
+    EXPECT_TRUE(cut) << limit;
+  }
+  // the strict parser refuses the same text
+  const TextProcessor strict(a, l);
+  std::vector<std::string> words;
+  std::string partial;
+  EXPECT_EQ(strict.parse_prefix(typed, words, partial), ParseError::TooLong);
+}
+
+TEST(ParseTyped, DoesNotValidateWhatItDrops) {
+  Limits l;
+  l.max_words = 2;
+  const TextProcessor tp(real_alphabet(), l);
+  std::vector<std::string> words;
+  std::string partial, detail;
+  bool cut = false;
+  // 日本 is outside the alphabet, but it falls off the front
+  ASSERT_EQ(tp.parse_typed("日本 abc def ", words, partial, cut), ParseError::None);
+  EXPECT_EQ(words.size(), 2u);
+  EXPECT_TRUE(cut);
+  // the same characters in the part that is kept are still an error
+  EXPECT_EQ(tp.parse_typed("abc def 日本 ", words, partial, cut, &detail), ParseError::UnknownCharacter);
+  EXPECT_TRUE(words.empty());
+  EXPECT_NE(detail.find("日"), std::string::npos);
+}
+
+TEST(ParseTyped, StillRejectsWhatCannotBeAWord) {
+  Limits l;
+  l.max_word_letters = 5;
+  const TextProcessor tp(real_alphabet(), l);
+  std::vector<std::string> words;
+  std::string partial;
+  bool cut = false;
+  EXPECT_EQ(tp.parse_typed("ab abcdefgh ", words, partial, cut), ParseError::TooLong);
+  EXPECT_EQ(tp.parse_typed("\xFF\xFE", words, partial, cut), ParseError::InvalidUtf8);
+  // one giant token is a word that is too long, however the input is cut
+  Limits l2;
+  l2.max_input_bytes = 16;
+  l2.max_word_letters = 8;  // what is left after the cut (16 letters) is still too long
+  const TextProcessor tp2(real_alphabet(), l2);
+  EXPECT_EQ(tp2.parse_typed(std::string(100, 'a'), words, partial, cut), ParseError::TooLong);
+}

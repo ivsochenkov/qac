@@ -198,6 +198,7 @@ void Index::bump_global(QueryVal& q, const std::vector<WordId>& ids, std::uint32
   q.freq = sat_add(before, count);
   if (before == 0 && q.freq > 0) ++global_queries_;
   weight_add(ids.data(), ids.size(), q.freq - before);
+  if (hot_cfg_.letters != 0 && !ids.empty()) hot_upsert(ids[0], q.id, q.freq);
 }
 
 void Index::drop_if_unused(QueryTrie::iterator it) {
@@ -296,6 +297,7 @@ bool Index::remove_global(QueryId id) {
   weight_sub(w, n, q.freq);
   q.freq = 0;
   --global_queries_;
+  if (hot_cfg_.letters != 0 && n > 0) hot_erase(w[0], id);
   drop_if_unused(it);
   return true;
 }
@@ -379,6 +381,26 @@ std::vector<Index::Hit> Index::top_global(const std::vector<WordId>& prefix,
                                           GlobalRank rank) const {
   if (n == 0 || (prefix.empty() && partial.empty())) return {};
 
+  // A partial first word of a few letters is the most expensive shape to scan; the
+  // hot-prefix table answers it exactly (see enable_hot_prefixes).
+  if (rank == GlobalRank::Frequency && prefix.empty() && hot_cfg_.letters != 0 &&
+      partial.size() <= hot_cfg_.letters && n <= hot_cfg_.top) {
+    std::vector<Hit> hot;
+    if (hot_lookup(partial, n, hot)) {
+      stats.hot = true;
+      return hot;
+    }
+  }
+
+  // A partial last word is resolved through the dictionary (candidate_words), which is the
+  // expensive part of the lookup. If no stored query starts with the complete words in front
+  // of it, nothing can match, whatever the word: one probe of the trie saves all of that. (The
+  // tail fallback relies on this: its shorter lookups often match nothing.)
+  if (!prefix.empty() && !partial.empty()) {
+    const auto probe = queries_.equal_prefix_range_ks(prefix.data(), prefix.size());
+    if (probe.first == probe.second) return {};
+  }
+
   std::size_t budget = limits.max_visited;
 
   // Walks the candidates and offers each live global query to `top`, built by `make_hit`.
@@ -393,6 +415,7 @@ std::vector<Index::Hit> Index::top_global(const std::vector<WordId>& prefix,
         }
         --budget;
         ++stats.visited;
+        ++stats.scanned;
         const QueryVal& v = it.value();
         if (v.freq == 0) continue;  // user-only query
         top.push(make_hit(v));
@@ -458,6 +481,7 @@ std::vector<Index::Hit> Index::top_user(std::uint32_t user, const std::vector<Wo
     }
     --budget;
     ++stats.visited;
+    ++stats.scanned;
     const UserVal& v = it.value();
     if (!partial.empty()) {
       std::size_t cnt = 0;
@@ -469,6 +493,125 @@ std::vector<Index::Hit> Index::top_user(std::uint32_t user, const std::vector<Wo
     top.push(Hit{v.id, v.freq, v.last_used});
   }
   return top.take();
+}
+
+// ---------------------------------------------------------------- hot prefixes
+
+namespace {
+
+constexpr unsigned kMaxHotLetters = 4;
+
+// Same order as GlobalBetter, for the hot lists' items.
+struct HotBetter {
+  template <class Item>
+  bool operator()(const Item& a, const Item& b) const {
+    if (a.freq != b.freq) return a.freq > b.freq;
+    return a.id < b.id;
+  }
+};
+
+}  // namespace
+
+std::uint64_t Index::hot_key(const char* p, std::size_t len) noexcept {
+  std::uint64_t packed = 0;
+  for (std::size_t i = 0; i < len; ++i) packed = (packed << 8) | static_cast<unsigned char>(p[i]);
+  return (static_cast<std::uint64_t>(len) << 32) | packed;  // len <= 4: packed fits 32 bits
+}
+
+void Index::enable_hot_prefixes(const HotPrefixConfig& cfg) {
+  hot_.clear();
+  if (cfg.letters == 0 || cfg.top == 0) {
+    hot_cfg_ = HotPrefixConfig{};
+    return;
+  }
+  hot_cfg_.letters = std::min(cfg.letters, kMaxHotLetters);
+  hot_cfg_.top = cfg.top;
+
+  const std::size_t cap = hot_capacity();
+  const HotBetter better;
+  std::unordered_map<std::uint64_t, std::size_t> total;  // members seen per prefix
+
+  for (auto it = queries_.begin(); it != queries_.end(); ++it) {
+    const QueryVal& v = it.value();
+    if (v.freq == 0) continue;  // user-only query
+    std::size_t n = 0;
+    const std::uint32_t* w = query_words(v.id, n);
+    if (w == nullptr || n == 0) continue;
+    const std::string_view first = word(w[0]);
+    const HotItem item{v.freq, v.id};
+    const std::size_t longest = std::min<std::size_t>(hot_cfg_.letters, first.size());
+    for (std::size_t len = 1; len <= longest; ++len) {
+      const std::uint64_t key = hot_key(first.data(), len);
+      ++total[key];
+      auto& items = hot_[key].items;
+      // A bounded heap whose front is the worst kept item (see TopK).
+      if (items.size() < cap) {
+        items.push_back(item);
+        std::push_heap(items.begin(), items.end(), better);
+      } else if (better(item, items.front())) {
+        std::pop_heap(items.begin(), items.end(), better);
+        items.back() = item;
+        std::push_heap(items.begin(), items.end(), better);
+      }
+    }
+  }
+  for (auto& kv : hot_) {
+    std::sort(kv.second.items.begin(), kv.second.items.end(), better);
+    kv.second.complete = total[kv.first] <= cap;
+  }
+}
+
+void Index::hot_upsert(WordId first_word, QueryId id, std::uint32_t freq) {
+  if (hot_cfg_.letters == 0 || freq == 0) return;
+  const std::string_view first = word(first_word);
+  const std::size_t cap = hot_capacity();
+  const HotBetter better;
+  const HotItem item{freq, id};
+  const std::size_t longest = std::min<std::size_t>(hot_cfg_.letters, first.size());
+  for (std::size_t len = 1; len <= longest; ++len) {
+    HotList& list = hot_[hot_key(first.data(), len)];  // a missing prefix is an empty, complete set
+    auto& items = list.items;
+    const auto cur = std::find_if(items.begin(), items.end(),
+                                  [id](const HotItem& x) { return x.id == id; });
+    if (cur != items.end()) {
+      items.erase(cur);  // a member whose frequency rose: put it back at its new place
+    } else if (!list.complete && (items.empty() || !better(item, items.back()))) {
+      continue;  // not among the best items.size() queries: the list stays exact as it is
+    }
+    items.insert(std::lower_bound(items.begin(), items.end(), item, better), item);
+    if (items.size() > cap) {
+      items.pop_back();
+      list.complete = false;
+    }
+  }
+}
+
+void Index::hot_erase(WordId first_word, QueryId id) {
+  if (hot_cfg_.letters == 0) return;
+  const std::string_view first = word(first_word);
+  const std::size_t longest = std::min<std::size_t>(hot_cfg_.letters, first.size());
+  for (std::size_t len = 1; len <= longest; ++len) {
+    const auto it = hot_.find(hot_key(first.data(), len));
+    if (it == hot_.end()) continue;
+    auto& items = it->second.items;
+    const auto cur = std::find_if(items.begin(), items.end(),
+                                  [id](const HotItem& x) { return x.id == id; });
+    if (cur != items.end()) items.erase(cur);  // the rest is still the exact top of what is left
+    if (it->second.complete && items.empty()) hot_.erase(it);
+  }
+}
+
+bool Index::hot_lookup(std::string_view partial, std::size_t n, std::vector<Hit>& out) const {
+  out.clear();
+  const auto it = hot_.find(hot_key(partial.data(), partial.size()));
+  if (it == hot_.end()) return true;  // no query starts with it
+  const HotList& list = it->second;
+  if (!list.complete && list.items.size() < n) return false;  // lost members: scan instead
+  const std::size_t take = std::min(n, list.items.size());
+  out.reserve(take);
+  for (std::size_t i = 0; i < take; ++i)
+    out.push_back(Hit{list.items[i].id, list.items[i].freq, 0, 0, 0});
+  return true;
 }
 
 // ---------------------------------------------------------------- maintenance
@@ -536,6 +679,8 @@ Index::Stats Index::stats() const {
   s.dead_queries = dead_queries_;
   s.arena_bytes = word_arena_.size() + word_off_.size() * 16 + query_arena_.size() * 4 +
                   query_off_.size() * 8;
+  s.hot_prefixes = hot_.size();
+  for (const auto& kv : hot_) s.hot_entries += kv.second.items.size();
   return s;
 }
 

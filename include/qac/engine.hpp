@@ -68,6 +68,12 @@ struct EngineConfig {
   // clear it immediately). entries == 0 disables it.
   std::size_t cache_entries = 10000;
   unsigned cache_ttl_ms = 2000;
+
+  // Precomputed top lists for partial first words of 1..hot_prefix_letters letters (the
+  // lookups that cost the most to scan). 0 switches the table off. Requests with n above
+  // hot_prefix_top, and rank=avg_word_freq, are scanned as usual. See Index::enable_hot_prefixes.
+  unsigned hot_prefix_letters = 2;
+  std::size_t hot_prefix_top = 100;
 };
 
 struct Suggestion {
@@ -78,6 +84,10 @@ struct Suggestion {
   // Mean frequency of the words of the query; set only when the request asked for
   // GlobalRank::AverageWordFrequency (global suggestions).
   std::optional<double> score;
+  // How many of the last words of the input (the one being typed included) this suggestion
+  // matches: the whole input for a normal lookup, fewer for a tail-fallback match. A client
+  // that applies the suggestion replaces exactly that many trailing words of what was typed.
+  std::uint32_t matched_words = 0;
 };
 
 struct CompleteRequest {
@@ -89,6 +99,16 @@ struct CompleteRequest {
   // Ranking of the global candidates: by query frequency (default), or by the mean
   // frequency of the words each candidate consists of. Does not affect the user list.
   Index::GlobalRank rank = Index::GlobalRank::Frequency;
+
+  // Tail fallback. A long input rarely matches a stored query as a whole, so when a lookup
+  // finds fewer than n (global) or m (user) suggestions, the engine retries with only the
+  // last `tail` words of the input (the word being typed counts), then with one word fewer,
+  // and so on down to `min_tail` words. Suggestions of the longer lookups come first; the
+  // shorter ones fill the remaining places, and a query is listed once. tail = 0 switches the
+  // fallback off. A lookup is skipped when a word in it is unknown. min_tail is clamped to
+  // 1..tail.
+  std::size_t tail = 3;
+  std::size_t min_tail = 2;
 };
 
 struct CompleteResult : Result {
@@ -96,6 +116,8 @@ struct CompleteResult : Result {
   std::vector<Suggestion> global;
   std::vector<Suggestion> user;
   bool truncated = false;  // a scan budget ran out: results may be approximate
+  // The input was longer than the limits (words, bytes) and only its end was used.
+  bool input_truncated = false;
   std::uint64_t took_us = 0;
 };
 
@@ -123,6 +145,7 @@ struct EngineStats {
   std::uint64_t cache_hits = 0;
   std::uint64_t cache_misses = 0;
   std::uint64_t completes = 0;
+  std::uint64_t hot_lookups = 0;  // lookups answered from the hot-prefix table
   std::uint64_t writes = 0;
   std::uint64_t recovered_records = 0;
   bool maintenance_running = false;
@@ -174,6 +197,7 @@ class Engine {
   std::string path(const char* name) const;
   void recover();
   void open_directory();  // lock, load snapshot, replay WAL, open the log
+  void enable_hot_prefixes(Index& idx) const;
 
   const Alphabet& alphabet_;
   EngineConfig cfg_;
@@ -199,6 +223,7 @@ class Engine {
 
   std::unique_ptr<ResultCache> cache_;
   mutable std::atomic<std::uint64_t> completes_{0};
+  mutable std::atomic<std::uint64_t> hot_lookups_{0};
   std::atomic<std::uint64_t> writes_{0};
 
   std::atomic<bool> stop_{false};
