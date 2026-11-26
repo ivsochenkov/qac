@@ -1,5 +1,7 @@
 # qac — query autocomplete
 
+![qac!](qac.jpg)
+
 A C++17 library and REST server that completes what a user is typing from a pool of
 past queries: the **global** pool (what everybody searches) and the **user's own
 history**, ranked by frequency. Built for hundreds of millions of queries, UTF-8 text,
