@@ -2,9 +2,9 @@
 //
 // JamSpell is used purely as a spell corrector: a model is loaded and
 // FixFragment() is called. None of its code or definitions are reused.
-// The fork's headers are kept out of this interface, and out of every translation
-// unit that includes this project's other headers: the fork bundles its own copy
-// of the tsl containers (see cmake/jamspell/CMakeLists.txt).
+// The fork's headers are large, so they are kept out of this interface and out of
+// every translation unit but jamspell_fixer.cpp. (JamSpell and this project are built
+// from the same copy of hat-trie, array-hash and cereal; see cmake/jamspell/CMakeLists.txt.)
 #pragma once
 
 #include <memory>

@@ -13,7 +13,6 @@ endif()
 
 option(QAC_BUILD_TESTS "Build unit and integration tests" ON)
 option(QAC_BUILD_BENCH "Build the benchmark" ON)
-option(QAC_WITH_JAMSPELL "Spell correction through the JamSpell fork (third_party/jamspell)" ON)
 option(QAC_SANITIZE "Build with AddressSanitizer + UBSan" OFF)
 
 set(QAC_DEFAULT_WARNINGS -Wall -Wextra -Wpedantic -Wno-unused-parameter)
@@ -27,23 +26,47 @@ endif()
 # Dependencies
 # ---------------------------------------------------------------------------
 find_package(Threads REQUIRED)
-find_package(Boost 1.75 REQUIRED CONFIG COMPONENTS program_options json)
+find_package(Boost 1.75 REQUIRED COMPONENTS program_options json locale)
 
-foreach(dep hat-trie cereal)
-  if(NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/third_party/${dep}")
+# All third-party code comes from one place: the JamSpell fork (branch master), a git
+# submodule, and the submodules nested in it:
+#
+#   third_party/jamspell                                     spell correction (required)
+#     third_party/hat-trie                                   the index (header-only)
+#       third_party/array-hash                               hat-trie's buckets (header-only)
+#         third_party/cereal                                 snapshot serialization (header-only)
+#     third_party/robin-map                                  used by JamSpell (header-only)
+#
+# so that qac and JamSpell are built from the same copy of each of them. Only googletest, which
+# the fork does not carry, is not part of it: the tests use an installed one (find_package(GTest)).
+set(QAC_JAMSPELL_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/third_party/jamspell)
+set(QAC_HAT_TRIE_ROOT ${QAC_JAMSPELL_ROOT}/third_party/hat-trie)
+set(QAC_ARRAY_HASH_ROOT ${QAC_HAT_TRIE_ROOT}/third_party/array-hash)
+set(QAC_CEREAL_ROOT ${QAC_ARRAY_HASH_ROOT}/third_party/cereal)
+set(QAC_ROBIN_MAP_ROOT ${QAC_JAMSPELL_ROOT}/third_party/robin-map)
+
+set(QAC_THIRD_PARTY_PROBES
+  ${QAC_JAMSPELL_ROOT}/jamspell/spell_corrector.hpp
+  ${QAC_HAT_TRIE_ROOT}/include/tsl/htrie_map.h
+  ${QAC_ARRAY_HASH_ROOT}/include/tsl/array_map.h
+  ${QAC_CEREAL_ROOT}/include/cereal/cereal.hpp
+  ${QAC_ROBIN_MAP_ROOT}/include/tsl/robin_map.h)
+foreach(probe IN LISTS QAC_THIRD_PARTY_PROBES)
+  if(NOT EXISTS "${probe}")
     message(FATAL_ERROR
-      "third_party/${dep} is missing. Run: git submodule update --init --recursive")
+      "${probe} is missing.\n"
+      "The third-party code lives in the JamSpell submodule and the submodules nested in it. Run:\n"
+      "  git submodule update --init --recursive")
   endif()
 endforeach()
 
-# hat-trie and cereal are header-only: expose them as interface targets.
+# hat-trie (with the array-hash it includes) and cereal are header-only: interface targets.
 add_library(qac_hat_trie INTERFACE)
 target_include_directories(qac_hat_trie SYSTEM INTERFACE
-  ${CMAKE_CURRENT_SOURCE_DIR}/third_party/hat-trie/include)
+  ${QAC_HAT_TRIE_ROOT}/include ${QAC_ARRAY_HASH_ROOT}/include)
 
 add_library(qac_cereal INTERFACE)
-target_include_directories(qac_cereal SYSTEM INTERFACE
-  ${CMAKE_CURRENT_SOURCE_DIR}/third_party/cereal/include)
+target_include_directories(qac_cereal SYSTEM INTERFACE ${QAC_CEREAL_ROOT}/include)
 
 # ---------------------------------------------------------------------------
 # Core library: alphabet, tokenizer, index, WAL, snapshots, engine
@@ -82,20 +105,17 @@ if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
 endif()
 
 # ---------------------------------------------------------------------------
-# Optional spell correction through the JamSpell fork
+# Spell correction through the JamSpell fork
 # ---------------------------------------------------------------------------
-if(QAC_WITH_JAMSPELL)
-  add_subdirectory(cmake/jamspell jamspell_dep)
-  add_library(qac_jamspell_fixer STATIC src/jamspell_fixer.cpp)
-  add_library(qac::jamspell_fixer ALIAS qac_jamspell_fixer)
-  # Includes only qac/spell_fixer.hpp and qac/utf8.hpp (both dependency-free) plus the
-  # fork's headers; linking qac_core here would put hat-trie on the include path of a
-  # translation unit that sees the fork's differing copy of it.
-  target_include_directories(qac_jamspell_fixer PUBLIC
-    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>)
-  target_link_libraries(qac_jamspell_fixer PRIVATE qac::jamspell)
-  target_compile_options(qac_jamspell_fixer PRIVATE ${QAC_DEFAULT_WARNINGS})
-endif()
+add_subdirectory(cmake/jamspell jamspell_dep)
+add_library(qac_jamspell_fixer STATIC src/jamspell_fixer.cpp)
+add_library(qac::jamspell_fixer ALIAS qac_jamspell_fixer)
+# Includes only qac/spell_fixer.hpp and qac/utf8.hpp (both dependency-free) plus the fork's
+# headers, which keeps those large headers out of everything else in this project.
+target_include_directories(qac_jamspell_fixer PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>)
+target_link_libraries(qac_jamspell_fixer PRIVATE qac::jamspell)
+target_compile_options(qac_jamspell_fixer PRIVATE ${QAC_DEFAULT_WARNINGS})
 
 # ---------------------------------------------------------------------------
 # The command line tool / server
@@ -117,11 +137,7 @@ add_executable(qac src/main.cpp ${CMAKE_CURRENT_BINARY_DIR}/generated/demo_page.
 target_compile_options(qac PRIVATE ${QAC_DEFAULT_WARNINGS})
 target_compile_definitions(qac PRIVATE
   QAC_BUNDLED_ALPHABET="${CMAKE_CURRENT_SOURCE_DIR}/data/alphabet.txt")
-target_link_libraries(qac PRIVATE qac_api Boost::program_options)
-if(QAC_WITH_JAMSPELL)
-  target_compile_definitions(qac PRIVATE QAC_HAVE_JAMSPELL=1)
-  target_link_libraries(qac PRIVATE qac_jamspell_fixer)
-endif()
+target_link_libraries(qac PRIVATE qac_api qac_jamspell_fixer Boost::program_options)
 
 if(QAC_BUILD_BENCH)
   add_executable(qac_bench bench/bench.cpp)

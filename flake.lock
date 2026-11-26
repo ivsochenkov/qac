@@ -1,22 +1,5 @@
 {
   "nodes": {
-    "cereal": {
-      "flake": false,
-      "locked": {
-        "lastModified": 1773211289,
-        "narHash": "sha256-rV7TJtZ41i+4cWGcfBWfSNzhg11c4WG6uGV32k2XRLU=",
-        "owner": "USCiLab",
-        "repo": "cereal",
-        "rev": "22a1b369f39be918ca79206a83c4facd759f9105",
-        "type": "github"
-      },
-      "original": {
-        "owner": "USCiLab",
-        "repo": "cereal",
-        "rev": "22a1b369f39be918ca79206a83c4facd759f9105",
-        "type": "github"
-      }
-    },
     "flake-utils": {
       "inputs": {
         "systems": "systems"
@@ -35,55 +18,23 @@
         "type": "github"
       }
     },
-    "googletest": {
-      "flake": false,
-      "locked": {
-        "lastModified": 1794885434,
-        "narHash": "sha256-lF1BNmI+WwHxCpQ3sqNZEoIkLRLK+UFOJqeQy0ph2I8=",
-        "owner": "google",
-        "repo": "googletest",
-        "rev": "a46a6012a133c7c0929fdae55b321c2fe65f3c5f",
-        "type": "github"
-      },
-      "original": {
-        "owner": "google",
-        "repo": "googletest",
-        "rev": "a46a6012a133c7c0929fdae55b321c2fe65f3c5f",
-        "type": "github"
-      }
-    },
-    "hat-trie": {
-      "flake": false,
-      "locked": {
-        "lastModified": 1794924948,
-        "narHash": "sha256-qQ+062g/zAioWxdIv4MWlKtVioJBBr2SJ9RZv5M28L8=",
-        "owner": "ivsochenkov",
-        "repo": "hat-trie",
-        "rev": "f2eb2df7ed781a1b51e1646147526f9995c11e42",
-        "type": "github"
-      },
-      "original": {
-        "owner": "ivsochenkov",
-        "repo": "hat-trie",
-        "rev": "f2eb2df7ed781a1b51e1646147526f9995c11e42",
-        "type": "github"
-      }
-    },
     "jamspell": {
       "flake": false,
       "locked": {
-        "lastModified": 1793911326,
-        "narHash": "sha256-3rWpu1GyhZ4qyEQzwvM5T+SVyZkNLVm98ICScxDIjsk=",
-        "owner": "ivsochenkov",
-        "repo": "JamSpell",
-        "rev": "6d3e49c5b73fbf253df4c2b4ed9364be532c7aad",
-        "type": "github"
+        "lastModified": 1795697770,
+        "narHash": "sha256-pcApmu3w+0Y/TPB8YMD0INMUNtgsJjAR8HgCgn8VLj8=",
+        "ref": "master",
+        "rev": "edd24bbf5e5462cb9467c9337b7a476143a73593",
+        "revCount": 319,
+        "submodules": true,
+        "type": "git",
+        "url": "https://github.com/ivsochenkov/JamSpell"
       },
       "original": {
-        "owner": "ivsochenkov",
-        "repo": "JamSpell",
-        "rev": "6d3e49c5b73fbf253df4c2b4ed9364be532c7aad",
-        "type": "github"
+        "ref": "master",
+        "submodules": true,
+        "type": "git",
+        "url": "https://github.com/ivsochenkov/JamSpell"
       }
     },
     "nixpkgs": {
@@ -104,10 +55,7 @@
     },
     "root": {
       "inputs": {
-        "cereal": "cereal",
         "flake-utils": "flake-utils",
-        "googletest": "googletest",
-        "hat-trie": "hat-trie",
         "jamspell": "jamspell",
         "nixpkgs": "nixpkgs"
       }

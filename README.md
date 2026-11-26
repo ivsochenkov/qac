@@ -5,20 +5,21 @@ past queries: the **global** pool (what everybody searches) and the **user's own
 history**, ranked by frequency. Built for hundreds of millions of queries, UTF-8 text,
 and updates while the server runs.
 
-* Dictionary and query index on a **hat-trie** (`third_party/hat-trie`, your fork).
+* Dictionary and query index on a **hat-trie** (your fork, taken from the JamSpell submodule: `third_party/jamspell/third_party/hat-trie`).
   Every word is a `std::uint32_t` id; a query is a sequence of ids.
 * **Boost.Tokenizer** segments the input; a **custom alphabet** (≤255 letters, one byte
   per letter, case/accent folding) normalises it.
 * **Boost.Asio / Beast** HTTP server: I/O threads plus a separate worker `thread_pool`.
 * **Snapshot + write-ahead log** persistence with crash recovery.
-* Optional **spell correction** through your JamSpell fork (`FixFragment`), off unless
-  a request asks for it.
-* CMake build, git submodules, `flake.nix`. C++17, Boost ≥ 1.75.
+* **Spell correction** through your JamSpell fork (`FixFragment`; always built in, used
+  when the server is started with `--jamspell-model` and a request asks for it).
+* CMake build, one git submodule (JamSpell, with its own submodules), `flake.nix`.
+  C++17, Boost ≥ 1.75.
 
 ## Build
 
 ```sh
-git submodule update --init --recursive     # hat-trie, JamSpell fork, cereal, googletest
+git submodule update --init --recursive     # JamSpell (branch master) and the submodules nested in it
 cmake -S . -B build -G Ninja
 cmake --build build
 ctest --test-dir build -j2
@@ -26,40 +27,69 @@ ctest --test-dir build -j2
 
 | option | default | |
 |---|---|---|
-| `QAC_WITH_JAMSPELL` | ON | spell correction through `third_party/jamspell` |
 | `QAC_BUILD_TESTS` | ON | GoogleTest suite |
 | `QAC_BUILD_BENCH` | ON | `qac_bench` |
 | `QAC_SANITIZE` | OFF | AddressSanitizer + UBSan |
 
-Dependencies besides the submodules: Boost ≥ 1.75 (`program_options`, `json`, and
-`locale` for JamSpell; Asio, Beast, Tokenizer, Interprocess are header-only).
+**Third-party code.** JamSpell is required, and so is everything it brings: there is one
+submodule, `third_party/jamspell` (the `master` branch of
+<https://github.com/ivsochenkov/JamSpell>), and qac builds against the submodules nested in it,
+so that JamSpell and qac are compiled from the same copy of each:
 
-**Compilers.** GCC 13 builds everything. Clang 18 builds and passes the whole suite with
-`-DQAC_WITH_JAMSPELL=OFF`; with JamSpell ON it fails *inside the JamSpell fork*
+```
+third_party/jamspell                          spell correction
+  third_party/hat-trie                        the index (header-only)
+    third_party/array-hash                    hat-trie's buckets (header-only)
+      third_party/cereal                      snapshot serialization (header-only)
+  third_party/robin-map                       used by JamSpell (header-only)
+```
+
+`.gitmodules` has `branch = master` for it. To move to the current master of the fork:
+`git submodule update --init --remote third_party/jamspell && git submodule update --init --recursive`,
+then commit the new submodule revision. CMake stops with a message naming the missing file if a
+submodule is not checked out.
+
+Dependencies besides the submodules: Boost ≥ 1.75 (`program_options`, `json` and `locale`;
+Asio, Beast, Tokenizer, Interprocess are header-only), and for the tests an installed
+GoogleTest (`find_package(GTest)`, as in the fork: Debian/Ubuntu `libgtest-dev`, Nix `gtest`).
+
+**Compilers.** GCC 13 builds everything. Clang was not tried with the current JamSpell
+`master`; with the earlier revision of the fork Clang 18 failed *inside the fork*
 (`spell_corrector.cpp`, `lang_model.cpp`: a `boost::container::string` is passed where
 `const std::string&` is expected, which libstdc++ tolerates and Clang rejects). The fork is
-treated as an untouched external dependency, so this needs a fix there. Until then use
-GCC for builds that include JamSpell.
+treated as an untouched external dependency, so if that is still so it needs a fix there; use
+GCC until it is checked.
+
+**The fork's own build.** JamSpell `master` (90b9483) does not build from a fresh checkout on its
+own: `jamspell/CMakeLists.txt` adds `third_party/hat-trie/third_party/include` for array-hash, a
+directory that does not exist (it is `…/third_party/array-hash/include`). `cmake/jamspell`
+works around that, so qac builds with the fork untouched; the fix for the fork itself is
+`docs/jamspell-fork-array-hash-include.patch` (`git apply` it in the fork).
 
 **JamSpell needs the `ru_RU.UTF-8` locale** on the machine that loads the model (the fork
-constructs `std::locale("ru_RU.UTF-8")`). Debian/Ubuntu: `locale-gen ru_RU.UTF-8`. Nix: the
-flake sets `LOCALE_ARCHIVE` for you. `qac` reports this with an actionable message.
+constructs `std::locale("ru_RU.UTF-8")`), and on the machine that builds and tests qac (the
+test suite trains a small model). Debian/Ubuntu: `locale-gen ru_RU.UTF-8`. Nix: the flake sets
+`LOCALE_ARCHIVE` for you. `qac` reports this with an actionable message.
 
 ### Nix
 
 ```sh
-nix build .                      # qac with JamSpell (also: .#qac-no-jamspell, .#qac-clang)
+nix build .                      # qac (also: .#qac-clang)
 nix run . -- serve --data-dir ./data
 nix develop                      # dev shell with the toolchain and LOCALE_ARCHIVE
 ```
 
-The four dependencies are pinned as flake inputs at the commits of the git submodules
-(`flake.nix`; keep them in sync when you update a submodule). A NixOS module is provided
-(`nixosModules.default`, `services.qac.enable = true;`).
+All third-party code is one flake input, the `master` branch of the JamSpell fork fetched
+together with its submodules (`git+https://…/JamSpell?ref=master&submodules=1`; a `github:`
+input would not contain the submodules). `nix flake lock` pins its commit in `flake.lock`
+(there is none in the repository yet), `nix flake update jamspell` moves it to the current
+master. GoogleTest is nixpkgs' `gtest`. A NixOS module is provided (`nixosModules.default`,
+`services.qac.enable = true;`).
 
 > **Not verified:** the Nix files could not be built in the environment they were written
-> in (no access to nixpkgs). They parse, and the package/module expressions were evaluated
-> against stand-ins, but the first real `nix build` may need small fixes.
+> in (no Nix, no access to nixpkgs). The change to a single `git+https` input with
+> `submodules=1` in particular has not been evaluated, so the first real `nix build` may need
+> small fixes.
 
 ## Quick start
 
@@ -362,8 +392,9 @@ build/qac_bench --queries 1000000 # synthetic benchmark: training, lookups on 1/
 ```
 
 The suite also passes under AddressSanitizer + UBSan + LeakSanitizer and ThreadSanitizer.
-The JamSpell tests train a small model once at build time (≈4 GB RAM) and skip themselves
-if `ru_RU.UTF-8` is missing.
+The JamSpell tests train a small model once at build time (≈250 MB RAM: the fork would reserve
+≈4 GB for its default 100 M n-grams, so the build lowers that with the fork's `SPLL_MAX_GRAMS_SIZE` /
+`SPLL_MAX_DICT_SIZE`) and skip themselves if `ru_RU.UTF-8` is missing.
 
 ## Layout
 
@@ -373,13 +404,12 @@ src/main.cpp          the qac command
 cmake/jamspell/       build shim for the JamSpell fork (see the comment inside)
 web/index.html        demo page, compiled into the binary
 data/                 alphabet.txt, sample_queries.txt
-docs/PROPOSALS.md     ideas that were not implemented, with reasons
+docs/                 PROPOSALS.md (ideas not implemented), the patch for the fork's own build
 tests/, bench/        GoogleTest suite and benchmark
 nix/, flake.nix       package, NixOS module, dev shell
-third_party/          submodules: hat-trie, jamspell, cereal, googletest
+third_party/          one submodule, jamspell, with hat-trie, array-hash, cereal, robin-map nested in it
 ```
 
-The JamSpell fork bundles its own, older copy of the `tsl` containers. To keep it from
-clashing with the hat-trie, the fork's targets are built with `tsl` renamed
-(`cmake/jamspell/CMakeLists.txt`), and the only qac file that sees the fork's headers
-(`src/jamspell_fixer.cpp`) includes nothing else from this project.
+JamSpell and qac are built from the same copy of hat-trie, array-hash and cereal (see
+*Build*), so there is nothing to keep apart. The JamSpell headers are large, though, and the only
+qac file that includes them (`src/jamspell_fixer.cpp`) includes nothing else from this project.

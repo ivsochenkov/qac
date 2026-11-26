@@ -1,12 +1,4 @@
-[submodule "third_party/hat-trie"]
-	path = third_party/hat-trie
-	url = https://github.com/ivsochenkov/hat-trie
 [submodule "third_party/jamspell"]
 	path = third_party/jamspell
 	url = https://github.com/ivsochenkov/JamSpell
-[submodule "third_party/cereal"]
-	path = third_party/cereal
-	url = https://github.com/USCiLab/cereal
-[submodule "third_party/googletest"]
-	path = third_party/googletest
-	url = https://github.com/google/googletest
+	branch = master

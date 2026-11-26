@@ -20,9 +20,7 @@
 #include "qac/http_server.hpp"
 #include "qac/log.hpp"
 #include "qac/train.hpp"
-#ifdef QAC_HAVE_JAMSPELL
 #include "qac/jamspell_fixer.hpp"
-#endif
 
 namespace po = boost::program_options;
 namespace fs = std::filesystem;
@@ -124,13 +122,9 @@ Alphabet load_alphabet(const Common& c) {
 }
 
 std::shared_ptr<const SpellFixer> load_fixer(const Common& c) {
-  if (c.jamspell_model.empty()) return nullptr;
-#ifdef QAC_HAVE_JAMSPELL
+  if (c.jamspell_model.empty()) return nullptr;  // correction is available only with a model
   log_info("loading JamSpell model " + c.jamspell_model);
   return std::shared_ptr<const SpellFixer>(JamSpellFixer::load(c.jamspell_model));
-#else
-  throw std::runtime_error("this build has no JamSpell support (configured with QAC_WITH_JAMSPELL=OFF)");
-#endif
 }
 
 std::string bytes_h(std::uint64_t b) {
