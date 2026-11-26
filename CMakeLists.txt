@@ -26,7 +26,7 @@ endif()
 # Dependencies
 # ---------------------------------------------------------------------------
 find_package(Threads REQUIRED)
-find_package(Boost 1.75 REQUIRED COMPONENTS program_options json locale)
+find_package(Boost 1.75 REQUIRED CONFIG COMPONENTS program_options json locale)
 
 # All third-party code comes from one place: the JamSpell fork (branch master), a git
 # submodule, and the submodules nested in it:
